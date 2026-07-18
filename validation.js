@@ -363,14 +363,10 @@ function startLoadValidation() {
     loadValidationRunning = true;
     loadCellRangeN = 500;
     var valueEl = document.getElementById('load-validation-value');
-    var minEl = document.getElementById('load-validation-min');
-    var maxEl = document.getElementById('load-validation-max');
     var statusCard = document.getElementById('load-validation-status-card');
     var statusText = document.getElementById('load-validation-status-text');
     var completeBtn = document.getElementById('load-validation-complete-btn');
     if (valueEl) valueEl.textContent = '--';
-    if (minEl) minEl.textContent = '--';
-    if (maxEl) maxEl.textContent = '--';
     if (statusCard) statusCard.style.display = 'none';
     if (completeBtn) completeBtn.disabled = true;
 
@@ -428,14 +424,6 @@ function connectLoadValidationSSE() {
                     loadValidationReadings.push(g);
                     var valueEl = document.getElementById('load-validation-value');
                     if (valueEl) valueEl.textContent = (g / 1000).toFixed(2);
-                    var minEl = document.getElementById('load-validation-min');
-                    var maxEl = document.getElementById('load-validation-max');
-                    if (loadValidationReadings.length) {
-                        var min = Math.min.apply(null, loadValidationReadings);
-                        var max = Math.max.apply(null, loadValidationReadings);
-                        if (minEl) minEl.textContent = (min / 1000).toFixed(2);
-                        if (maxEl) maxEl.textContent = (max / 1000).toFixed(2);
-                    }
                     var completeBtn = document.getElementById('load-validation-complete-btn');
                     if (completeBtn && loadValidationReadings.length >= 3) completeBtn.disabled = false;
                 }
@@ -475,8 +463,6 @@ function completeLoadValidation() {
     stopLoadValidationSSE();
     fetch('/api/hardware/validation/load/stop', { method: 'POST' }).catch(function () {});
 
-    var min = Math.min.apply(null, loadValidationReadings);
-    var max = Math.max.apply(null, loadValidationReadings);
     var mean = loadValidationReadings.reduce(function (a, b) { return a + b; }, 0) / loadValidationReadings.length;
     var expectedWeightEl = document.getElementById('load-validation-expected-weight');
     var expectedWeight = expectedWeightEl && expectedWeightEl.value.trim() ? parseFloat(expectedWeightEl.value.trim()) : null;
@@ -488,14 +474,10 @@ function completeLoadValidation() {
         createdAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),
         readings: loadValidationReadings,
-        min: min,
-        max: max,
         mean: mean,
         expectedWeight: expectedWeight,
         testData: {
             readings: loadValidationReadings,
-            min: min,
-            max: max,
             mean: mean,
             expectedWeight: expectedWeight,
             operatorName: userInfo.operatorName,
@@ -539,7 +521,7 @@ function completeLoadValidation() {
                 } else {
                     console.warn('[DEBUG] No navigation function available');
                 }
-            }, reportId);
+            }, reportId, 'validation');
         })
         .catch(function (e) {
             console.error('Failed to save report:', e);
@@ -725,7 +707,7 @@ function completeDistanceValidationSave() {
                 } else {
                     console.warn('[DEBUG] No navigation function available');
                 }
-            }, reportId);
+            }, reportId, 'validation');
         })
         .catch(function (e) {
             console.error('Failed to save report:', e);
@@ -840,7 +822,7 @@ function startLoadCalibration() {
                         } else if (typeof goToPage === 'function') {
                             goToPage('reports');
                         }
-                    }, reportId);
+                    }, reportId, 'calibration');
                 })
                 .catch(function (e) {
                     showCalibrationDueModal(function () {
@@ -850,7 +832,7 @@ function startLoadCalibration() {
                         distanceCalibRunning = false;
                         kioskAlert('Weight calibration completed successfully. Report save failed: ' + e.message);
                         if (typeof goToPage === 'function') goToPage('reports');
-                    });
+                    }, null, 'calibration');
                 });
         } else if (response.indexOf('C,LOAD,ERR') !== -1 || response.indexOf('ERR') !== -1) {
             if (statusEl) statusEl.textContent = 'Error';
@@ -962,7 +944,7 @@ function startDistanceZeroCalibration() {
                 } else if (typeof goToPage === 'function') {
                     goToPage('reports');
                 }
-            }, reportId);
+            }, reportId, 'calibration');
         }).catch(function (e) {
             distanceCalibRunning = false;
             distanceCalibState = CALIB_READY;
@@ -976,13 +958,24 @@ function startDistanceZeroCalibration() {
     }
 }
 
-// ===== CALIBRATION DUE DATE MODAL =====
+// ===== CALIBRATION / VALIDATION DUE DATE MODAL =====
 var _calibrationDueCallback = null;
 var _calibrationDueReportId = null;
+var _calibrationDueKind = 'calibration';
 
-function showCalibrationDueModal(callback, reportId) {
+function showCalibrationDueModal(callback, reportId, dueKind) {
     _calibrationDueCallback = callback || null;
     _calibrationDueReportId = (reportId != null && reportId !== '') ? reportId : null;
+    _calibrationDueKind = (String(dueKind || '').toLowerCase() === 'validation') ? 'validation' : 'calibration';
+    var titleEl = document.getElementById('calibration-due-modal-title');
+    var textEl = document.getElementById('calibration-due-modal-text');
+    if (_calibrationDueKind === 'validation') {
+        if (titleEl) titleEl.textContent = 'Set Next Validation Due Date';
+        if (textEl) textEl.textContent = 'Select when the next validation is due:';
+    } else {
+        if (titleEl) titleEl.textContent = 'Set Next Calibration Due Date';
+        if (textEl) textEl.textContent = 'Select when the next calibration is due:';
+    }
     var modal = document.getElementById('calibration-due-modal');
     if (modal) modal.style.display = 'flex';
 }
@@ -992,6 +985,7 @@ function closeCalibrationDueModal() {
     if (modal) modal.style.display = 'none';
     _calibrationDueCallback = null;
     _calibrationDueReportId = null;
+    _calibrationDueKind = 'calibration';
 }
 
 function confirmCalibrationDue(months) {
@@ -1003,10 +997,11 @@ function confirmCalibrationDue(months) {
     var lastFormatted = formatDateForDisplay(lastDate);
     var nextFormatted = formatDateForDisplay(nextDateStr);
     var reportId = _calibrationDueReportId;
+    var dueKind = _calibrationDueKind || 'calibration';
     var cb = _calibrationDueCallback;
 
     function finishDueModal() {
-        console.log('[DEBUG] Calibration due date saved, executing callback');
+        console.log('[DEBUG] Due date saved (' + dueKind + '), executing callback');
         closeCalibrationDueModal();
         if (typeof window !== 'undefined') {
             window._userAbortedOperation = false;
@@ -1031,7 +1026,8 @@ function confirmCalibrationDue(months) {
     // Persist dates via dedicated route (never POST /factory-settings — that audits as Factory settings changed).
     var datesBody = {
         lastValidationDate: lastFormatted,
-        nextValidationDate: nextFormatted
+        nextValidationDate: nextFormatted,
+        dueKind: dueKind
     };
     var datesReq = fetch('/api/data/factory-settings/validation-dates', {
         method: 'POST',
@@ -1050,7 +1046,8 @@ function confirmCalibrationDue(months) {
             body: JSON.stringify({
                 months: months,
                 lastValidationDate: lastFormatted,
-                nextValidationDate: nextFormatted
+                nextValidationDate: nextFormatted,
+                dueKind: dueKind
             })
         }).then(function (r) {
             return r.json().then(function (data) { return { ok: r.ok, data: data }; });
@@ -1065,8 +1062,8 @@ function confirmCalibrationDue(months) {
     }).then(function () {
         finishDueModal();
     }).catch(function (e) {
-        console.error('[DEBUG] Failed to save calibration due date:', e);
-        kioskAlert('Failed to save next validation interval: ' + (e.message || 'Unknown error'));
+        console.error('[DEBUG] Failed to save due date:', e);
+        kioskAlert('Failed to save next ' + dueKind + ' interval: ' + (e.message || 'Unknown error'));
     });
 }
 

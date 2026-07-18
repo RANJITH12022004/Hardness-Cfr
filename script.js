@@ -686,6 +686,14 @@ function goBack() {
         }
     } else if (pageId === 'page-calibration-type-select') {
         goToPage('validate');
+    } else if (pageId === 'page-password-expired-reset') {
+        if (window._passwordResetScreenMode === 'profile') {
+            window._passwordResetScreenMode = '';
+            goToPage('user-profile');
+        } else {
+            if (typeof showLoginScreen === 'function') showLoginScreen();
+            else goToPage('login');
+        }
     } else {
         goToPage('home');
     }
@@ -2620,8 +2628,7 @@ async function populateReportPreviewDom(stored) {
                 var subtype = stored.validationSubtype || 'load';
                 var valStatus = stored.approvalPassFail || stored.status || 'Pending';
                 if (subtype === 'load') {
-                    rows.push('<tr><th>Expected Weight (g)</th><td>' + (stored.expectedWeight != null ? stored.expectedWeight : '--') + '</td><th>Min (g)</th><td>' + (stored.min != null ? stored.min.toFixed(2) : '--') + '</td></tr>');
-                    rows.push('<tr><th>Max (g)</th><td>' + (stored.max != null ? stored.max.toFixed(2) : '--') + '</td><th>Mean (g)</th><td>' + (stored.mean != null ? stored.mean.toFixed(2) : '--') + '</td></tr>');
+                    rows.push('<tr><th>Expected Weight (g)</th><td>' + (stored.expectedWeight != null ? stored.expectedWeight : '--') + '</td><th>Mean (g)</th><td>' + (stored.mean != null ? stored.mean.toFixed(2) : '--') + '</td></tr>');
                     rows.push('<tr><th>Status</th><td colspan="3">' + valStatus + '</td></tr>');
                 } else {
                     rows.push('<tr><th>Gauge Value (mm)</th><td>' + (stored.expectedGaugeBlock != null ? (typeof stored.expectedGaugeBlock === 'number' ? stored.expectedGaugeBlock.toFixed(2) : stored.expectedGaugeBlock) : '--') + '</td><th>Measured Value (mm)</th><td>' + (stored.distance != null ? (typeof stored.distance === 'number' ? stored.distance.toFixed(2) : stored.distance) : '--') + '</td></tr>');
@@ -3306,6 +3313,10 @@ async function buildPdfHtmlByIdMap(ids) {
                 }
                 return null;
             }
+            // USB export footer must say Export Date/Time (not Printed).
+            html = String(html)
+                .replace(/Printed Date:/g, 'Export Date:')
+                .replace(/Printed Time:/g, 'Export Time:');
             out[String(rid)] = html;
         } catch (e) {
             if (typeof showAppModal === 'function') {
@@ -5994,46 +6005,11 @@ function selectRole(roleName) {
 }
 
 async function saveUserProfile() {
-    var newNameEl = document.getElementById('profile-fullname');
-    var newPassEl = document.getElementById('profile-password');
-    var newName = newNameEl ? newNameEl.value.trim() : '';
-    var newPass = newPassEl ? newPassEl.value : '';
-    if (!newName) {
-        kioskAlert('Please enter a name.');
+    if (typeof openProfilePasswordReset === 'function') {
+        openProfilePasswordReset();
         return;
     }
-    var user = (typeof window.currentUser !== 'undefined' && window.currentUser) ? window.currentUser : (typeof currentUser !== 'undefined' && currentUser) ? currentUser : null;
-    if (!user || user.id == null) {
-        try {
-            var res = await apiRequest('/api/data/auth/current-user');
-            user = res && res.user ? res.user : null;
-        } catch (e) {
-            console.error('Failed to get current user:', e);
-        }
-    }
-    if (!user || user.id == null) {
-        kioskAlert('Cannot save profile: no user logged in.');
-        return;
-    }
-    try {
-        var existing = await apiRequest('/api/data/members/' + user.id);
-        var member = existing && existing.member ? existing.member : {};
-        var payload = { id: user.id, name: newName, username: member.username || user.username || '', role: member.role || user.role || '' };
-        payload.password = (newPass && newPass.length > 0) ? newPass : (member.password || '');
-        await apiRequest('/api/data/members/' + user.id, {
-            method: 'PUT',
-            body: JSON.stringify(payload)
-        });
-        if (typeof window.currentUser !== 'undefined') window.currentUser.name = newName;
-        if (typeof currentUser !== 'undefined') { currentUser = currentUser || {}; currentUser.name = newName; }
-        var displayEl = document.getElementById('profile-name-display');
-        if (displayEl) displayEl.textContent = newName;
-        if (newPassEl) newPassEl.value = '';
-        showModal('Success', 'Profile saved successfully.');
-    } catch (e) {
-        console.error('Failed to save profile:', e);
-        kioskAlert('Failed to save profile: ' + (e.message || 'Unknown error'));
-    }
+    kioskAlert('Use Edit Password to change your password.');
 }
 
 
@@ -7699,6 +7675,28 @@ function initAuditReportsVisibility() {
     if (auditBtn) auditBtn.style.display = canViewAuditLog() ? '' : 'none';
 }
 
+function _clearLoginPasswordField() {
+    var loginPwd = document.getElementById('login-pwd');
+    if (loginPwd) loginPwd.value = '';
+}
+
+function _preparePasswordResetFields(username, focusId) {
+    // Clear login password so Chromium does not autofill reset fields from it.
+    _clearLoginPasswordField();
+    var userEl = document.getElementById('expired-reset-username');
+    var oldEl = document.getElementById('expired-reset-old-password');
+    var newEl = document.getElementById('expired-reset-new-password');
+    var confEl = document.getElementById('expired-reset-confirm-password');
+    if (userEl) userEl.value = username || '';
+    // Never pre-fill password fields (default/expired/mandatory). Autofill from login
+    // or leftover DOM values made Current/New/Confirm appear filled after first login.
+    if (oldEl) oldEl.value = '';
+    if (newEl) newEl.value = '';
+    if (confEl) confEl.value = '';
+    var focusEl = focusId ? document.getElementById(focusId) : oldEl;
+    if (focusEl && typeof focusEl.focus === 'function') focusEl.focus();
+}
+
 function showPasswordExpiredResetScreen(username, oldPassword) {
     window._passwordExpiredUsername = username || '';
     window._mandatoryPasswordResetPending = false;
@@ -7712,17 +7710,15 @@ function showPasswordExpiredResetScreen(username, oldPassword) {
     if (login) login.style.display = 'none';
     if (app) app.style.display = 'flex';
     if (typeof goToPage === 'function') goToPage('password-expired-reset');
+    // oldPassword arg kept for call-site compat; do not inject into the form.
+    void oldPassword;
     setTimeout(function () {
-        var userEl = document.getElementById('expired-reset-username');
-        var oldEl = document.getElementById('expired-reset-old-password');
-        var newEl = document.getElementById('expired-reset-new-password');
-        var confEl = document.getElementById('expired-reset-confirm-password');
-        if (userEl) userEl.value = username || '';
-        if (oldEl) oldEl.value = oldPassword || '';
-        if (newEl) newEl.value = '';
-        if (confEl) confEl.value = '';
-        if (newEl && typeof newEl.focus === 'function') newEl.focus();
+        _preparePasswordResetFields(username, 'expired-reset-old-password');
     }, 60);
+    // Chromium may autofill after first paint; clear again once.
+    setTimeout(function () {
+        _preparePasswordResetFields(username, null);
+    }, 350);
 }
 
 function showMandatoryPasswordResetScreen(username) {
@@ -7739,9 +7735,28 @@ function showMandatoryPasswordResetScreen(username) {
     if (app) app.style.display = 'flex';
     if (typeof goToPage === 'function') goToPage('password-expired-reset');
     setTimeout(function () {
-        var userEl = document.getElementById('expired-reset-username');
-        if (userEl) userEl.value = username || '';
+        _preparePasswordResetFields(username, 'expired-reset-old-password');
     }, 60);
+    setTimeout(function () {
+        _preparePasswordResetFields(username, null);
+    }, 350);
+}
+
+function showProfilePasswordResetScreen(username) {
+    window._passwordExpiredUsername = username || '';
+    window._mandatoryPasswordResetPending = false;
+    window._passwordResetScreenMode = 'profile';
+    var titleEl = document.getElementById('password-reset-page-title');
+    var subEl = document.getElementById('password-reset-page-subtitle');
+    if (titleEl) titleEl.textContent = 'Change Password';
+    if (subEl) subEl.textContent = 'Enter current password and choose a new one.';
+    if (typeof goToPage === 'function') goToPage('password-expired-reset');
+    setTimeout(function () {
+        _preparePasswordResetFields(username, 'expired-reset-old-password');
+    }, 60);
+    setTimeout(function () {
+        _preparePasswordResetFields(username, null);
+    }, 350);
 }
 
 function submitPasswordResetFromLoginPage() {
@@ -7749,6 +7764,7 @@ function submitPasswordResetFromLoginPage() {
 }
 
 function submitExpiredPasswordReset() {
+    var mode = window._passwordResetScreenMode || '';
     var user = window._passwordExpiredUsername ||
         ((document.getElementById('expired-reset-username') || {}).value || '');
     var oldPwd = (document.getElementById('expired-reset-old-password') || {}).value || '';
@@ -7756,11 +7772,51 @@ function submitExpiredPasswordReset() {
         document.getElementById('password-expired-new') || document.getElementById('pwd-reset-new') || {}).value || '';
     var p2 = (document.getElementById('expired-reset-confirm-password') ||
         document.getElementById('password-expired-confirm') || document.getElementById('pwd-reset-confirm') || {}).value || '';
+    if (!oldPwd) {
+        kioskAlert('Enter your current password.');
+        return;
+    }
     if (!p1 || p1 !== p2) { kioskAlert('Passwords do not match.'); return; }
+    if (oldPwd === p1) {
+        kioskAlert('New password must be different from current password.');
+        return;
+    }
+    if (typeof getStrongPasswordError === 'function') {
+        var strengthErr = getStrongPasswordError(p1);
+        if (strengthErr) { kioskAlert(strengthErr); return; }
+    }
+    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+
+    if (mode === 'profile') {
+        var headers = { 'Content-Type': 'application/json' };
+        try {
+            var cu = window.currentUser || (typeof currentUser !== 'undefined' ? currentUser : null);
+            if (cu) {
+                if (cu.role) headers['X-User-Role'] = cu.role;
+                if (cu.name) headers['X-User-Name'] = cu.name;
+                if (cu.username) headers['X-User-Username'] = cu.username;
+            }
+        } catch (eHdr) { /* ignore */ }
+        fetch(base + '/api/data/auth/profile', {
+            method: 'PUT',
+            headers: headers,
+            body: JSON.stringify({ oldPassword: oldPwd, password: p1 })
+        }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+          .then(function (res) {
+            if (res.ok && res.body && (res.body.ok || res.body.member || res.body.success)) {
+                window._passwordResetScreenMode = '';
+                kioskAlert('Password updated.');
+                if (typeof goToPage === 'function') goToPage('user-profile');
+            } else {
+                kioskAlert((res.body && (res.body.error || res.body.message)) || 'Password update failed');
+            }
+          }).catch(function (e) { kioskAlert(e.message || 'Password update failed'); });
+        return;
+    }
+
     var endpoint = window._mandatoryPasswordResetPending
         ? '/api/data/auth/mandatory-password-reset'
         : '/api/data/auth/password-expired-reset';
-    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
     var payload = { username: user, newPassword: p1, confirmPassword: p2 };
     if (oldPwd) payload.oldPassword = oldPwd;
     fetch(base + endpoint, {
@@ -7771,6 +7827,7 @@ function submitExpiredPasswordReset() {
       .then(function (res) {
         if (res.ok && res.body && (res.body.success || res.body.ok)) {
             window._mandatoryPasswordResetPending = false;
+            window._passwordResetScreenMode = '';
             kioskAlert('Password updated. Please log in.');
             if (typeof showLoginScreen === 'function') showLoginScreen();
             else if (typeof goToPage === 'function') goToPage('login');

@@ -891,14 +891,8 @@ def _validation_details_table_html(preview: Dict[str, Any]) -> str:
         status = resolve_validation_result_status(preview)
         if subtype == "load":
             rows.append(
-                "<tr><th>Expected Weight (g)</th><td>{}</td><th>Min (g)</th><td>{}</td></tr>".format(
+                "<tr><th>Expected Weight (g)</th><td>{}</td><th>Mean (g)</th><td>{}</td></tr>".format(
                     _html_esc(preview.get("expectedWeight", "--")),
-                    _html_esc(preview.get("min", "--")),
-                )
-            )
-            rows.append(
-                "<tr><th>Max (g)</th><td>{}</td><th>Mean (g)</th><td>{}</td></tr>".format(
-                    _html_esc(preview.get("max", "--")),
                     _html_esc(preview.get("mean", "--")),
                 )
             )
@@ -961,15 +955,17 @@ def _derived_test_result_html(derived: Dict[str, Any]) -> str:
     )
 
 
-def build_report_pdf_html(report: Dict[str, Any]) -> str:
+def build_report_pdf_html(report: Dict[str, Any], *, timestamp_kind: str = "printed") -> str:
     """
     Build PDF HTML from the A4 text formatter output (====, ----, ****).
-    Printed date/time appears only in the footer (same as dot-matrix A4 print).
+    Date/time appears only in the footer (Printed for print, Export for USB export).
     """
     import print_service
 
     enriched = enrich_report_context(dict(report or {}))
-    a4_text = print_service.format_for_a4_printer(enriched).rstrip()
+    a4_text = print_service.format_for_a4_printer(
+        enriched, timestamp_kind=timestamp_kind
+    ).rstrip()
     escaped = html_module.escape(a4_text)
 
     css = (

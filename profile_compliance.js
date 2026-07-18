@@ -1094,71 +1094,32 @@ function applyAuditFiltersAndRefresh() {
 }
 
 
-function saveUserProfile() {
-    var fullNameEl = document.getElementById('profile-fullname');
-    var passwordEl = document.getElementById('profile-password');
-    var newName = fullNameEl ? (fullNameEl.value || '').trim() : '';
-    var newPassword = passwordEl ? (passwordEl.value || '') : '';
-    if (newPassword) {
-        var profilePasswordError = getStrongPasswordError(newPassword);
-        if (profilePasswordError) {
-            if (typeof showModalCompat === 'function') showModalCompat(profilePasswordError, 'User Profile');
-            return;
-        }
-    }
-
-    var user = (typeof window.currentUser !== 'undefined' && window.currentUser) ? window.currentUser : (typeof currentUser !== 'undefined' && currentUser) ? currentUser : null;
-    if (!user) {
+function openProfilePasswordReset() {
+    var user = (typeof window.currentUser !== 'undefined' && window.currentUser)
+        ? window.currentUser
+        : (typeof currentUser !== 'undefined' ? currentUser : null);
+    var username = (user && (user.username || user.name)) ? String(user.username || user.name) : '';
+    if (!username) {
         if (typeof showModalCompat === 'function') showModalCompat('No user logged in.', 'User Profile');
+        else if (typeof kioskAlert === 'function') kioskAlert('No user logged in.');
         return;
     }
-
-    var memberId = user.id;
-    var isFactory = (memberId === 0 || memberId === undefined || memberId === null);
-
-    function updateLocalName(name) {
-        if (window.currentUser) window.currentUser.name = name;
-        if (typeof currentUser !== 'undefined') { currentUser = currentUser || {}; currentUser.name = name; }
-        try { localStorage.setItem('currentUser', JSON.stringify(window.currentUser || currentUser)); } catch (e) {}
-        var displayEl = document.getElementById('profile-name-display');
-        if (displayEl) displayEl.textContent = name || '---';
+    if (typeof showProfilePasswordResetScreen === 'function') {
+        showProfilePasswordResetScreen(username);
+    } else if (typeof goToPage === 'function') {
+        goToPage('password-expired-reset');
     }
+}
 
-    if (isFactory) {
-        updateLocalName(newName || user.name || user.username || 'Factory');
-        if (passwordEl) passwordEl.value = '';
-        if (typeof showModalCompat === 'function') showModalCompat('Profile updated.', 'User Profile');
+/** Profile page no longer edits identity or password inline — password goes through reset page. */
+function saveUserProfile() {
+    if (typeof openProfilePasswordReset === 'function') {
+        openProfilePasswordReset();
         return;
     }
-
-    var payload = {};
-    if (newName) payload.name = newName;
-    if (newPassword) payload.password = newPassword;
-    if (!payload.name && !payload.password) {
-        if (typeof showModalCompat === 'function') {
-            showModalCompat('Enter a new full name and/or password to save.', 'User Profile');
-        }
-        return;
+    if (typeof showModalCompat === 'function') {
+        showModalCompat('Use Edit Password to change your password.', 'User Profile');
     }
-    if (!payload.name) {
-        payload.name = (user.name || user.username || '').trim();
-    }
-
-    apiRequest(API_BASE + '/api/data/auth/profile', {
-        method: 'PUT',
-        body: payload
-    })
-        .then(function (result) {
-            var updated = (result && result.member) ? result.member : result;
-            var nameToSet = (updated && updated.name) ? updated.name : newName;
-            updateLocalName(nameToSet || newName || (user.name || user.username));
-            if (passwordEl) passwordEl.value = '';
-            if (typeof showModalCompat === 'function') showModalCompat('Profile updated.', 'User Profile');
-        })
-        .catch(function (err) {
-            var msg = (err && err.message) ? err.message : 'Failed to update profile.';
-            if (typeof showModalCompat === 'function') showModalCompat(msg, 'User Profile');
-        });
 }
 
 function logAuditEvent(action, details, options) {
@@ -1222,6 +1183,8 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
         'Report aborted', 'Report aborted (power loss)', 'Report PDF generated',
         'Recipe created', 'Recipe edited', 'Recipe approved', 'Power interruption',
         'Approval verification', 'Disable Recipe', 'Recipe disabled',
+        'Export approved', 'Reports exported', 'Audit trail exported', 'Recipes exported',
+        'Validation due date set', 'Calibration due date set',
         'Added new user', 'Password changed', 'User create', 'User update'
     ];
     coreActions.forEach(function (a) {
@@ -1356,9 +1319,17 @@ function updateUIForUser() {
     var profileNameEl = document.getElementById('profile-name-display');
     var profileRoleEl = document.getElementById('profile-role-display');
     var profileEditNameEl = document.getElementById('profile-fullname');
+    var profileUserIdEl = document.getElementById('profile-userid');
     if (profileNameEl) profileNameEl.textContent = user.name || '';
     if (profileRoleEl) profileRoleEl.textContent = displayRoleLabel(user.role || '');
-    if (profileEditNameEl) profileEditNameEl.value = user.name || '';
+    if (profileEditNameEl) {
+        profileEditNameEl.value = user.name || '';
+        profileEditNameEl.readOnly = true;
+    }
+    if (profileUserIdEl) {
+        profileUserIdEl.value = user.username || '';
+        profileUserIdEl.readOnly = true;
+    }
 }
 
 (function () {

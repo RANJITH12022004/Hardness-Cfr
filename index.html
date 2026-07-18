@@ -740,10 +740,6 @@
                                     <span class="validation-card-unit">kg</span>
                                 </div>
                             </div>
-                            <div class="validation-stats-card">
-                                <span>Min: <strong id="load-validation-min">--</strong> kg</span>
-                                <span>Max: <strong id="load-validation-max">--</strong> kg</span>
-                            </div>
                             <div id="load-validation-status-card" class="validation-status-card" style="display:none;">
                                 <p id="load-validation-status-text"></p>
                             </div>
@@ -1616,19 +1612,21 @@
                             </div>
                             <div class="profile-edit-form">
                                 <div class="form-group full-width">
-                                    <label>Edit Full Name</label>
+                                    <label>Full Name</label>
                                     <input type="text" id="profile-fullname" class="input-field"
-                                        placeholder="Full name">
+                                        placeholder="Full name" readonly tabindex="-1">
                                 </div>
                                 <div class="form-group full-width">
-                                    <label>Edit Password</label>
-                                    <input type="password" id="profile-password" class="input-field"
-                                        placeholder="Enter new password">
+                                    <label>User ID</label>
+                                    <input type="text" id="profile-userid" class="input-field"
+                                        placeholder="User ID" readonly tabindex="-1" autocomplete="off">
+                                </div>
+                                <div class="form-group full-width">
+                                    <button type="button" class="btn btn-blue btn-block" onclick="openProfilePasswordReset()">Edit Password</button>
                                 </div>
                             </div>
                         </div>
                         <div class="profile-actions">
-                            <button class="btn btn-blue btn-block" onclick="saveUserProfile()">Save</button>
                             <button class="btn btn-orange btn-block" onclick="goToPage('manage-members')">Manage Profiles</button>
                             <button class="btn btn-blue btn-block" onclick="openAddMember()">Add Members</button>
                         </div>
@@ -2072,24 +2070,30 @@
                         <div class="add-member-form form-grid">
                             <div class="form-group full-width">
                                 <label>User ID</label>
-                                <input type="text" id="expired-reset-username" class="input-field" readonly>
+                                <input type="text" id="expired-reset-username" class="input-field" readonly autocomplete="off">
                             </div>
                             <div class="form-group full-width">
                                 <label>Current Password</label>
                                 <input type="password" id="expired-reset-old-password" class="input-field"
                                     placeholder="Enter current password"
+                                    autocomplete="new-password"
+                                    name="expired-reset-old-password"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
                             <div class="form-group full-width">
                                 <label>New Password</label>
                                 <input type="password" id="expired-reset-new-password" class="input-field"
                                     placeholder="Enter new password"
+                                    autocomplete="new-password"
+                                    name="expired-reset-new-password"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
                             <div class="form-group full-width">
                                 <label>Confirm New Password</label>
                                 <input type="password" id="expired-reset-confirm-password" class="input-field"
                                     placeholder="Confirm new password"
+                                    autocomplete="new-password"
+                                    name="expired-reset-confirm-password"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
                         </div>
@@ -2143,11 +2147,11 @@
         </div>
     </div>
 
-    <!-- Calibration Due Date Modal -->
+    <!-- Calibration / Validation Due Date Modal -->
     <div id="calibration-due-modal" class="validation-modal-overlay" style="display: none;">
         <div class="validation-modal-content">
-            <h2 class="calibration-modal-title">Set Next Calibration Due Date</h2>
-            <p class="validation-question-text" style="margin-bottom: 20px;">Select when the next calibration is due:</p>
+            <h2 id="calibration-due-modal-title" class="calibration-modal-title">Set Next Calibration Due Date</h2>
+            <p id="calibration-due-modal-text" class="validation-question-text" style="margin-bottom: 20px;">Select when the next calibration is due:</p>
             <div class="validation-buttons">
                 <button class="btn-validation-yes" onclick="confirmCalibrationDue(3)">3 Months</button>
                 <button class="btn-validation-yes" onclick="confirmCalibrationDue(6)">6 Months</button>
@@ -2330,9 +2334,9 @@
     <script src="keyboard.js?v=20260720f"></script>
     <script src="rbac.js?v=20260725c"></script>
     <script src="approval_biometric.js?v=20260725c"></script>
-    <script src="validation.js?v=20260725d"></script>
-    <script src="script.js?v=20260725d"></script>
-    <script src="profile_compliance.js?v=20260725b"></script>
+    <script src="validation.js?v=20260727a"></script>
+    <script src="script.js?v=20260727a"></script>
+    <script src="profile_compliance.js?v=20260726b"></script>
 </body>
 
 </html>

@@ -452,31 +452,44 @@ def convert_thermal_to_a4_layout(text: str, width: int = A4_TEXT_WIDTH) -> str:
     return "\n".join(out)
 
 
-def format_for_a4_printer(report_data: Any, *, include_printed_timestamp: bool = True) -> str:
+def format_for_a4_printer(
+    report_data: Any,
+    *,
+    include_printed_timestamp: bool = True,
+    timestamp_kind: str = "printed",
+) -> str:
     """
     Format report for A4 printer (80-char width, TapDensity / Friability layout).
     Uses native 80-char layout with ====, ---, and ** separators (same as saved A4 file).
-    Always appends Printed Date / Printed Time footer for calibration, validation, and test reports.
+    Always appends Printed/Export Date / Time footer for calibration, validation, and test reports.
     """
     if isinstance(report_data, dict):
         text = _format_report_text(report_data, width=A4_TEXT_WIDTH).rstrip("\n")
         if include_printed_timestamp:
-            stamp = "\n".join(_thermal_printed_timestamp_lines())
-            if "Printed Date:" not in text:
+            stamp = "\n".join(_report_timestamp_lines(kind=timestamp_kind))
+            kind = str(timestamp_kind or "printed").strip().lower()
+            label = "Export Date:" if kind == "export" else "Printed Date:"
+            if label not in text and "Printed Date:" not in text and "Export Date:" not in text:
                 text = text + stamp
+            elif kind == "export" and "Printed Date:" in text and "Export Date:" not in text:
+                text = text.replace("Printed Date:", "Export Date:").replace("Printed Time:", "Export Time:")
         return text
     return str(report_data).replace('<br>', '\n').replace('</p>', '\n')
 
 
-def format_for_thermal_printer(report_data: Dict[str, Any]) -> str:
+def format_for_thermal_printer(report_data: Dict[str, Any], *, timestamp_kind: str = "printed") -> str:
     """
     Format report for thermal printer (THERMAL_WIDTH chars, default 32).
     Always appends Printed Date / Printed Time footer for calibration, validation, and test reports.
     """
     text = _format_report_text(report_data, width=THERMAL_WIDTH).rstrip("\n")
-    stamp = "\n".join(_thermal_printed_timestamp_lines())
-    if "Printed Date:" not in text:
+    stamp = "\n".join(_report_timestamp_lines(kind=timestamp_kind))
+    kind = str(timestamp_kind or "printed").strip().lower()
+    label = "Export Date:" if kind == "export" else "Printed Date:"
+    if label not in text and "Printed Date:" not in text and "Export Date:" not in text:
         text = text + stamp
+    elif kind == "export" and "Printed Date:" in text and "Export Date:" not in text:
+        text = text.replace("Printed Date:", "Export Date:").replace("Printed Time:", "Export Time:")
     return text
 
 
@@ -801,8 +814,6 @@ def _format_validation_calibration_text(report_data: Dict[str, Any], width: int 
         if subtype == "load":
             lines.append("Load Validation Details:")
             lines.append(f"  Expected Weight: {report_data.get('expectedWeight', '--')} g")
-            lines.append(f"  Min: {_non_negative_display(report_data.get('min'), 2)} g")
-            lines.append(f"  Max: {_non_negative_display(report_data.get('max'), 2)} g")
             lines.append(f"  Mean: {_non_negative_display(report_data.get('mean'), 2)} g")
             lines.append(f"  Validation Status: {report_service.resolve_validation_result_status(report_data)}")
         else:
@@ -960,8 +971,8 @@ def _append_two_column_pairs(lines: list, pairs: list, width: int) -> None:
         lines.append(left + (" " * gap) + right)
 
 
-def _thermal_printed_timestamp_lines() -> list:
-    """Printed date/time from device RTC at format time."""
+def _report_timestamp_lines(kind: str = "printed") -> list:
+    """Date/time footer from device RTC. kind='printed' or 'export'."""
     try:
         import rtc_service
 
@@ -972,7 +983,13 @@ def _thermal_printed_timestamp_lines() -> list:
         now = datetime.now()
         pdate = now.strftime("%d-%m-%Y")
         ptime = now.strftime("%H:%M:%S")
-    return ["", f"Printed Date: {pdate}", f"Printed Time: {ptime}"]
+    label = "Export" if str(kind or "").strip().lower() == "export" else "Printed"
+    return ["", f"{label} Date: {pdate}", f"{label} Time: {ptime}"]
+
+
+def _thermal_printed_timestamp_lines() -> list:
+    """Printed date/time from device RTC at format time (compat wrapper)."""
+    return _report_timestamp_lines(kind="printed")
 
 
 def _approved_by_display_name(approved_by: Any) -> str:

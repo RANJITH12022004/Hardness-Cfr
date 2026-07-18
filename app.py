@@ -663,8 +663,13 @@ def _utc_now_iso():
     return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def _username_display(val):
+    """Preserve original User ID casing (strip only)."""
+    return str(val or "").strip()
+
+
 def _norm_username(val):
-    return str(val or "").strip().lower()
+    return _username_display(val).lower()
 
 
 def _report_operated_by_username(report):
@@ -938,12 +943,9 @@ def _require_user_manage_or_self(member_id: int):
 
 
 def _self_profile_payload_from_request(existing: dict, payload: dict) -> dict:
-    """Self-service profile: only display name and password may change."""
+    """Self-service profile: password only (name / User ID are not editable)."""
     out = dict(existing)
-    if "name" in payload:
-        name = str(payload.get("name") or "").strip()
-        if name:
-            out["name"] = name
+    # Ignore name/username from client — identity is locked on User Profile.
     new_pwd = payload.get("password")
     if new_pwd is not None and str(new_pwd).strip():
         pwd_err = _password_strength_error(str(new_pwd))
@@ -1133,7 +1135,7 @@ def _apply_recipe_approval_verify_token(processed, remarks=""):
         return verify_err, False
     verified_name = (verified.get("name") or verified.get("username") or "—").strip()
     verified_role = (verified.get("role") or "").strip()
-    verified_username = _norm_username(verified.get("username"))
+    verified_username = _username_display(verified.get("username")) or _norm_username(verified.get("username"))
     by_line = verified_name
     if verified_role:
         by_line = "{} ({})".format(verified_name, _display_role_label(verified_role))
@@ -1348,7 +1350,10 @@ def create_recipe():
         if processed.get("recipeApprovalStatus") == "approved":
             if via_token:
                 v_user = processed.get("recipeApprovedByUsername") or "--"
-                v_role = (request.headers.get("X-User-Role") or "").strip() or "--"
+                v_role = "--"
+                by_line = str(processed.get("recipeApprovedBy") or "")
+                if "(" in by_line and by_line.endswith(")"):
+                    v_role = by_line[by_line.rfind("(") + 1 : -1].strip() or "--"
                 _audit(v_user, v_role, "Recipe approved", rd)
             elif _effective_request_role() == "factory":
                 au = (request.headers.get("X-User-Username") or "").strip() or "--"
@@ -1423,7 +1428,10 @@ def update_recipe(recipe_id):
         if processed.get("recipeApprovalStatus") == "approved":
             if via_token:
                 v_user = processed.get("recipeApprovedByUsername") or "--"
-                v_role = (request.headers.get("X-User-Role") or "").strip() or "--"
+                v_role = "--"
+                by_line = str(processed.get("recipeApprovedBy") or "")
+                if "(" in by_line and by_line.endswith(")"):
+                    v_role = by_line[by_line.rfind("(") + 1 : -1].strip() or "--"
                 _audit(v_user, v_role, "Recipe approved", rd)
             elif _effective_request_role() == "factory":
                 au = (request.headers.get("X-User-Username") or "").strip() or "--"
@@ -1536,6 +1544,7 @@ def approve_recipe(recipe_id):
         if not recipe:
             return jsonify({"ok": False, "error": "Recipe not found"}), 404
         verified_username = _norm_username(verified.get("username"))
+        verified_username_display = _username_display(verified.get("username")) or verified_username
         st = recipe.get("recipeApprovalStatus")
         if st == "approved":
             existing_approver = _norm_username(recipe.get("recipeApprovedByUsername"))
@@ -1554,7 +1563,7 @@ def approve_recipe(recipe_id):
         recipe["recipeApprovalStatus"] = "approved"
         recipe["recipeApprovedAt"] = _utc_now_iso()
         recipe["recipeApprovedBy"] = by_line
-        recipe["recipeApprovedByUsername"] = verified_username
+        recipe["recipeApprovedByUsername"] = verified_username_display
         recipe["recipeApprovalRemarks"] = remarks
         data_service.save_recipe(recipe)
         rname = (recipe.get("productName") or recipe.get("name") or "").strip()
@@ -1564,7 +1573,7 @@ def approve_recipe(recipe_id):
         batch = recipe.get("batchNumber")
         if batch is not None and str(batch).strip():
             rdetail = "{} | batch: {}".format(rdetail, str(batch).strip())
-        v_audit_user = verified.get("username") or verified_username or verified_name
+        v_audit_user = verified.get("username") or verified_username_display or verified_name
         v_audit_role = (verified.get("role") or "").strip() or "--"
         _audit(
             v_audit_user,
@@ -1759,6 +1768,7 @@ def approve_report(report_id):
                     {"ok": False, "error": "Approval verification was issued for a different report type."}
                 ), 401
         verified_username = _norm_username(verified.get("username"))
+        verified_username_display = _username_display(verified.get("username")) or verified_username
         st_raw = report.get("reportApprovalStatus")
         st = str(st_raw or "").strip().lower()
         if st_raw is None:
@@ -1791,8 +1801,8 @@ def approve_report(report_id):
         report["status"] = pf
         report["approvalRemarks"] = remarks
         report["approvedBy"] = by_line
-        report["approvedByUsername"] = verified_username
-        report["approvedByEmployeeId"] = verified_username or "--"
+        report["approvedByUsername"] = verified_username_display
+        report["approvedByEmployeeId"] = verified_username_display or "--"
         report["approvedAt"] = _utc_now_iso()
         # Drop TapDensity drum fields if present on older records
         report.pop("drumPassFail", None)
@@ -1802,8 +1812,8 @@ def approve_report(report_id):
             td["approvalPassFail"] = pf
             td["status"] = pf
             td["approvedBy"] = by_line
-            td["approvedByUsername"] = verified_username
-            td["approvedByEmployeeId"] = verified_username or "--"
+            td["approvedByUsername"] = verified_username_display
+            td["approvedByEmployeeId"] = verified_username_display or "--"
             td.pop("drumPassFail", None)
             report["testData"] = td
         data_service.save_report(report)
@@ -1830,8 +1840,10 @@ def approve_report(report_id):
         if pdf_ok:
             _audit_report_pdf_generated(report_id, report)
         ctx = _format_report_audit_details(report_id, report)
-        appr_detail = "{} | {} | verified by {}".format(ctx, pf, verified_name)
-        v_audit_user = verified.get("username") or verified_username or verified_name
+        appr_detail = "{} | {} | verified by {} ({})".format(
+            ctx, pf, verified_name, verified_username_display or "--"
+        )
+        v_audit_user = verified.get("username") or verified_username_display or verified_name
         v_audit_role = (verified.get("role") or "").strip() or "--"
         _audit(
             v_audit_user,
@@ -2386,6 +2398,9 @@ def save_validation_due_dates():
         body = request.get_json(force=True, silent=True) or {}
         last = str(body.get("lastValidationDate") or "").strip()
         nxt = str(body.get("nextValidationDate") or "").strip()
+        due_kind = str(body.get("dueKind") or body.get("due_kind") or "").strip().lower()
+        if due_kind not in ("validation", "calibration"):
+            due_kind = "calibration"
         if not last or not nxt:
             return jsonify({"ok": False, "error": "lastValidationDate and nextValidationDate are required"}), 400
         stored = data_service.get_factory_settings() or {}
@@ -2396,10 +2411,13 @@ def save_validation_due_dates():
         updated["nextValidationDate"] = nxt
         data_service.save_factory_settings(updated)
         if before_last != last or before_next != nxt:
+            audit_action = (
+                "Validation due date set" if due_kind == "validation" else "Calibration due date set"
+            )
             _audit(
                 None,
                 None,
-                "Calibration due date set",
+                audit_action,
                 "Last: {} | Next: {}".format(last, nxt),
             )
         saved = data_service.get_factory_settings() or {}
@@ -2407,6 +2425,7 @@ def save_validation_due_dates():
             "ok": True,
             "lastValidationDate": saved.get("lastValidationDate"),
             "nextValidationDate": saved.get("nextValidationDate"),
+            "dueKind": due_kind,
         }), 200
     except Exception as e:
         app.logger.exception("Error saving validation due dates")
@@ -3095,15 +3114,33 @@ def approval_verify():
             verifier, purpose, report_type=report_type_for_verify if purpose == "report" else None
         )
         vname = verifier.get("username") or username
+        vdisplay = (verifier.get("name") or vname or "--").strip() or "--"
+        session_actor = _audit_actor()
+        verify_detail = (
+            "Verified by {} ({}) for {} | method {} | requested by {}"
+        ).format(
+            vdisplay,
+            vname,
+            purpose,
+            method,
+            session_actor.get("user") or "--",
+        )
         _audit_event(
             action="Approval verification",
             outcome="success",
             entity_type="verification",
             entity_name=purpose,
-            details="Verification token issued",
+            details=verify_detail,
             target_user=vname,
             signature={"mode": method, "username": vname, "role": verifier_role},
-            extra={"purpose": purpose, "method": method},
+            extra={"purpose": purpose, "method": method, "verifierUsername": vname, "verifierName": vdisplay},
+        )
+        # Visible User-column row for the person who approved (compliance).
+        _audit(
+            vname,
+            verifier_role or "--",
+            "Approval verification",
+            verify_detail,
         )
         return jsonify(
             {
@@ -3160,7 +3197,7 @@ def get_own_profile():
 
 @app.route("/api/data/auth/profile", methods=["PUT"])
 def update_own_profile():
-    """Any logged-in member may change their own display name and password."""
+    """Logged-in member may change their own password only (identity is locked)."""
     try:
         err = _require_auth()
         if err:
@@ -3173,16 +3210,23 @@ def update_own_profile():
             return jsonify({"error": "Member not found"}), 404
         member_id = int(member.get("id"))
         before_member = dict(member)
+        new_password = str(payload.get("password") or "").strip()
+        old_password = str(payload.get("oldPassword") or payload.get("old_password") or "")
+        if not new_password:
+            return jsonify({"error": "New password is required."}), 400
+        if not old_password:
+            return jsonify({"error": "Current password is required."}), 400
+        username = str(member.get("username") or "").strip()
+        auth_user = data_service.authenticate_user(username, old_password)
+        if not auth_user:
+            return jsonify({"error": "Current password is incorrect."}), 401
+        if old_password == new_password:
+            return jsonify({"error": "New password must be different from current password."}), 400
         try:
-            member_data = _self_profile_payload_from_request(before_member, payload)
+            member_data = _self_profile_payload_from_request(before_member, {"password": new_password})
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
-        name_in = "name" in payload and str(payload.get("name") or "").strip()
-        pwd_in = "password" in payload and str(payload.get("password") or "").strip()
-        if not name_in and not pwd_in:
-            return jsonify({"error": "Provide a name and/or new password to save."}), 400
         acting_id = _session_member_id()
-        password_changed = pwd_in
         data_service.save_member(member_data, acting_user_id=acting_id)
         updated = data_service.get_member(member_id) or member_data
         data_service.refresh_current_user_from_member()
@@ -3193,27 +3237,14 @@ def update_own_profile():
             "role": (cur_after.get("role") or "").strip() or "--",
         }
         uname = updated.get("username") or updated.get("name") or ""
-        if password_changed:
-            _audit_event(
-                action="Password changed",
-                outcome="success",
-                entity_type="member",
-                entity_id=member_id,
-                entity_name=uname,
-                details="Password changed (self) for user: {}".format(uname),
-                target_user=uname,
-                signature=sig,
-            )
         _audit_event(
-            action="Profile updated",
+            action="Password changed",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
             entity_name=uname,
-            details="Profile updated (self)",
+            details="Password changed (self) for user: {}".format(uname),
             target_user=uname,
-            before=data_service.sanitize_member_for_client(before_member),
-            after=data_service.sanitize_member_for_client(updated) or updated,
             signature=sig,
         )
         safe = data_service.sanitize_member_for_client(updated) or dict(updated)
@@ -3229,18 +3260,89 @@ def update_own_profile():
 
 
 def _require_export_usb_and_verification_json():
+    """Return (error_response_or_None, export_approval_verifier_payload_or_None).
+
+    Consumes the export approval token (non-factory) and returns the verifier so
+    export audit rows can record who approved.
+    """
     cur = data_service.get_current_user()
     if not cur:
-        return jsonify({"success": False, "error": "Unauthorized"}), 401
+        return (jsonify({"success": False, "error": "Unauthorized"}), 401), None
     data_service.refresh_current_user_from_member()
     if not _session_has_internal("export-usb"):
-        return jsonify({"success": False, "error": "Forbidden. Export to USB is not permitted for this account."}), 403
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Forbidden. Export to USB is not permitted for this account.",
+                }
+            ),
+            403,
+        ), None
     role = str(cur.get("role") or "").strip().lower()
+    verifier = None
     if role != "factory":
-        _verified, verify_err = _consume_approval_verify_token("export")
+        verified, verify_err = _consume_approval_verify_token("export")
         if verify_err:
-            return jsonify({"success": False, "error": verify_err}), 401
-    return None
+            return (jsonify({"success": False, "error": verify_err}), 401), None
+        verifier = verified
+    return None, verifier
+
+
+def _export_actor_labels(user_dict):
+    """Username / display name / role for export audit 'exported by' / 'approved by'."""
+    if not user_dict:
+        return "--", "--", "--"
+    username = str(
+        user_dict.get("username") or user_dict.get("name") or ""
+    ).strip() or "--"
+    name = str(user_dict.get("name") or username).strip() or "--"
+    role = str(user_dict.get("role") or "").strip() or "--"
+    return username, name, role
+
+
+def _export_approved_by_from_verifier(verifier, cur=None):
+    """Resolve export approver: verifier when present, else factory session user."""
+    if verifier:
+        return _export_actor_labels(verifier)
+    cur = cur if cur is not None else (data_service.get_current_user() or {})
+    role = str((cur or {}).get("role") or "").strip().lower()
+    if role == "factory":
+        return _export_actor_labels(cur)
+    return "--", "--", "--"
+
+
+def _format_export_approved_by_clause(verifier, cur=None):
+    """'approved by Name (username)' for audit details."""
+    username, name, _role = _export_approved_by_from_verifier(verifier, cur=cur)
+    if username == "--" and name == "--":
+        return "approved by --"
+    if name and name != username and username != "--":
+        return "approved by {} ({})".format(name, username)
+    return "approved by {}".format(name if name != "--" else username)
+
+
+def _audit_export_action(action, base_details, cur, verifier):
+    """Write export audit with exporter as actor and approver named in details."""
+    cur = cur or data_service.get_current_user() or {}
+    ex_u, ex_n, ex_r = _export_actor_labels(cur)
+    ap_u, ap_n, ap_r = _export_approved_by_from_verifier(verifier, cur=cur)
+    detail = "{} | exported by {} ({}) | approved by {} ({})".format(
+        base_details,
+        ex_n,
+        ex_u,
+        ap_n,
+        ap_u,
+    )
+    _audit(ex_u if ex_u != "--" else None, ex_r if ex_r != "--" else None, action, detail)
+    # Dedicated row so the approver appears in the User column as well.
+    if ap_u != "--" or ap_n != "--":
+        _audit(
+            ap_u if ap_u != "--" else ap_n,
+            ap_r if ap_r != "--" else None,
+            "Export approved",
+            "{} | {}".format(action, detail),
+        )
 
 
 @app.route("/api/data/audit-log", methods=["GET"])
@@ -3391,15 +3493,17 @@ def _humanize_audit_details(action: str, details: str) -> str:
         if "kiosk-bridge" in details.lower() or "clean shutdown" in details.lower():
             return "Unclean shutdown during active session"
         return details
-    if action == "Reports exported":
+    if action == "Reports exported" or action == "Export approved":
         import re
-        if details.lower().startswith("exported "):
+        if "approved by" in details.lower() or details.lower().startswith("exported "):
             return details
         m = re.search(r"\bok=(\d+)", details)
         if m:
             n = int(m.group(1))
             return "Exported {} report{} to USB".format(n, "" if n == 1 else "s")
-        return "Exported report(s) to USB"
+        return details if details else "Exported report(s) to USB"
+    if action in ("Audit trail exported", "Recipes exported", "Audit export cycle started"):
+        return details
     if action in ("Print thermal", "Print A4"):
         details = (
             details.replace(" | full data", "")
@@ -3730,7 +3834,7 @@ def export_audit_trails():
     """
     mounted_now = None
     try:
-        gate = _require_export_usb_and_verification_json()
+        gate, export_verifier = _require_export_usb_and_verification_json()
         if gate is not None:
             return gate
         audit_gate = _require_session_internal(
@@ -3798,21 +3902,20 @@ def export_audit_trails():
             unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
 
         batch_id = (data.get("batch_id") or data.get("batchId") or "").strip()
+        ap_u, _ap_n, _ap_r = _export_approved_by_from_verifier(export_verifier, cur=cur)
         if batch_id:
             audit_service.confirm_audit_export_batch(batch_id, str(out_path))
-            _audit(
-                cur.get("username") or cur.get("name"),
-                cur.get("role"),
+            _audit_export_action(
                 "Audit export cycle started",
-                "exporter={} | entries={} | batch={}".format(
-                    cur.get("username") or cur.get("name"), len(entries), batch_id
-                ),
+                "entries={} | batch={}".format(len(entries), batch_id),
+                cur,
+                export_verifier,
             )
-        _audit(
-            cur.get("username") or cur.get("name"),
-            cur.get("role"),
+        _audit_export_action(
             "Audit trail exported",
             "pdf {} | entries {}".format(out_path, len(entries)),
+            cur,
+            export_verifier,
         )
         return jsonify({
             "success": True,
@@ -3823,6 +3926,7 @@ def export_audit_trails():
             "unmount_detail": unmount_detail,
             "batchId": batch_id or None,
             "retentionNote": "Exported audit rows will be purged from the device 24 hours after successful export.",
+            "approvedBy": ap_u,
         }), 200
     except Exception as e:
         if mounted_now:
@@ -3949,7 +4053,7 @@ def export_recipes():
     mounted_now = None
     try:
         data = request.get_json(force=True, silent=True) or {}
-        gate = _require_export_usb_and_verification_json()
+        gate, export_verifier = _require_export_usb_and_verification_json()
         if gate is not None:
             return gate
         gate2 = _require_any_session_internal(
@@ -4011,13 +4115,13 @@ def export_recipes():
             exported_files.append(str(path_a4))
             exported_files.append(str(path_th))
 
-        _audit(
-            None,
-            None,
+        cur = data_service.get_current_user()
+        _audit_export_action(
             "Recipes exported",
             "Exported {} recipe file set(s) to USB".format(len(recipes)),
+            cur,
+            export_verifier,
         )
-
         unmount_detail = None
         if mounted_now and not requested_export_path:
             power_off = bool(data.get("power_off") or False)
@@ -4118,7 +4222,9 @@ def _remove_report_pdf_file(report_id: int) -> None:
         pass
 
 
-def _generate_report_pdf_file(report_id: int, write_audit: bool = True) -> bool:
+def _generate_report_pdf_file(
+    report_id: int, write_audit: bool = True, *, timestamp_kind: str = "printed"
+) -> bool:
     """Render report PDF from A4 plain-text layout (same as dot-matrix print). Overwrites any existing file."""
     report = data_service.get_report(report_id)
     if not report:
@@ -4128,7 +4234,7 @@ def _generate_report_pdf_file(report_id: int, write_audit: bool = True) -> bool:
         return False
     try:
         # CFR 21: always use server A4 text formatter (====, ----, ****), never UI preview HTML.
-        html = report_service.build_report_pdf_html(report)
+        html = report_service.build_report_pdf_html(report, timestamp_kind=timestamp_kind)
         out_path = _report_pdf_path(report_id)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         pdf_generator.render_html_to_pdf(html, out_path)
@@ -4254,7 +4360,7 @@ def export_reports():
                 continue
         if not report_ids:
             return jsonify({"success": False, "error": "No report IDs provided"}), 400
-        gate = _require_export_usb_and_verification_json()
+        gate, export_verifier = _require_export_usb_and_verification_json()
         if gate is not None:
             return gate
         batch_id = str(data.get("batch_id") or data.get("batchId") or "").strip()
@@ -4297,16 +4403,15 @@ def export_reports():
 
         exported_files = result.get("exported_files") or []
         ok_count = len(exported_files)
-        _audit(
-            None, None,
+        cur = data_service.get_current_user()
+        _audit_export_action(
             "Reports exported",
-            "Exported {} report{} to USB".format(
-                ok_count, "" if ok_count == 1 else "s"
-            ),
+            "Exported {} report{} to USB".format(ok_count, "" if ok_count == 1 else "s"),
+            cur,
+            export_verifier,
         )
         if batch_id and exported_files:
             data_service.confirm_report_export_batch(batch_id)
-
         unmount_detail = None
         if mounted_now and not requested_export_path:
             power_off = bool(data.get("power_off") or False)
@@ -4361,7 +4466,7 @@ def export_reports_stream():
     requested_export_path = (data.get("export_path") or "").strip() or None
     power_off = bool(data.get("power_off") or False)
 
-    gate = _require_export_usb_and_verification_json()
+    gate, export_verifier = _require_export_usb_and_verification_json()
     if gate is not None:
         return gate
     for rid in report_ids:
@@ -4433,7 +4538,7 @@ def export_reports_stream():
                              "percent": int(this_progress_at + per_report_pct * 0.3), "id": rid,
                              "status": "generating",
                              "message": "Generating PDF for report {} of {}...".format(i, total)})
-                if not _generate_report_pdf_file(rid):
+                if not _generate_report_pdf_file(rid, write_audit=False, timestamp_kind="export"):
                     result["failed"].append({"id": rid, "reason": "render"})
                     yield _emit({"event": "report", "current": i, "total": total,
                                  "percent": int(next_progress_at), "id": rid,
@@ -4473,12 +4578,14 @@ def export_reports_stream():
                 mounted_now = None
 
             ok_count = result["count"]
-            _audit(
-                None, None,
+            cur = data_service.get_current_user()
+            _audit_export_action(
                 "Reports exported",
                 "Exported {} report{} to USB".format(
                     ok_count, "" if ok_count == 1 else "s"
                 ),
+                cur,
+                export_verifier,
             )
 
             result["ok"] = (len(result["failed"]) == 0 and result["count"] > 0)
