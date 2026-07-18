@@ -1,0 +1,3 @@
+Hardness Tester — ESP UART command protocol (Pi <-> ESP adaptor).
+See ESP_COMMAND_SET.csv and Esp_code.cpp for the authoritative command set.
+Baud: typically 9600 on /dev/serial0 (ESP_PORT).
