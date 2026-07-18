@@ -2029,6 +2029,15 @@ select.input-field {
     background: linear-gradient(135deg, #60a5fa, #3b82f6);
 }
 
+
+.settings-ip-configure {
+    background: linear-gradient(135deg, #0ea5e9, #0284c7);
+}
+
+.settings-ip-configure:hover {
+    background: linear-gradient(135deg, #38bdf8, #0ea5e9);
+}
+
 .settings-recipes {
     background: linear-gradient(135deg, #14b8a6, #0d9488);
 }
@@ -9847,3 +9856,201 @@ input[type="number"] {
     }
 }
 
+
+
+/* IP Configure (from Friability CFR) */
+.ip-configure-container {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 30px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    width: 100%;
+}
+
+.ip-configure-hint {
+    margin: 0;
+    text-align: center;
+    color: var(--text-secondary, rgba(255, 255, 255, 0.7));
+    font-size: 15px;
+}
+
+.ip-configure-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ip-configure-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 18px 20px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-lg);
+}
+
+.ip-configure-iface {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary, rgba(255, 255, 255, 0.75));
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.ip-configure-family {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(14, 165, 233, 0.2);
+    color: #7dd3fc;
+}
+
+.ip-configure-address {
+    font-size: 22px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: #fff;
+    text-align: right;
+    word-break: break-all;
+}
+
+.ip-configure-loading,
+.ip-configure-empty {
+    text-align: center;
+    padding: 32px 16px;
+    color: var(--text-secondary, rgba(255, 255, 255, 0.7));
+    font-size: 16px;
+}
+
+.ip-configure-error {
+    color: #fca5a5;
+}
+
+.ip-configure-refreshed {
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-secondary, rgba(255, 255, 255, 0.55));
+    margin-top: 4px;
+}
+
+.ip-configure-section-title {
+    margin: 20px 0 10px;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-secondary, rgba(255, 255, 255, 0.65));
+}
+
+.ip-configure-section-title:first-child {
+    margin-top: 0;
+}
+
+.ip-configure-port {
+    font-size: 22px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: #fff;
+    text-align: right;
+}
+
+.ip-configure-port-label {
+    font-size: 15px;
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.btn-refresh-ip-configure {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    max-width: 320px;
+    margin: 0 auto;
+    padding: 16px 24px;
+    font-size: 18px;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #0ea5e9, #0284c7);
+    border: none;
+    border-radius: var(--radius-lg);
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s, opacity 0.2s;
+}
+
+.btn-refresh-ip-configure:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(14, 165, 233, 0.35);
+}
+
+.btn-refresh-ip-configure:disabled {
+    opacity: 0.65;
+    cursor: wait;
+}
+
+/* ===== REPORTS PAGE ===== */
+.reports-container {
+    max-width: 100%;
+    width: 100%;
+    margin: 0 auto;
+}
+
+.reports-page-layout {
+    padding: 12px 8px;
+}
+
+
+
+/* Report approval navigation lock */
+.app-container.report-approval-locked .nav-item[data-page],
+.app-container.validation-run-locked .nav-item[data-page],
+.app-container.test-run-locked .nav-item[data-page],
+.app-container.report-approval-locked .user-profile,
+.app-container.report-approval-locked .logout-btn,
+.app-container.report-approval-locked #header-logo,
+.app-container.report-approval-locked #header-back-btn,
+.app-container.test-run-locked .user-profile,
+.app-container.test-run-locked .logout-btn,
+.app-container.test-run-locked #header-logo,
+.app-container.test-run-locked #header-back-btn,
+.app-container.validation-run-locked .user-profile,
+.app-container.validation-run-locked .logout-btn,
+.app-container.validation-run-locked #header-logo,
+.app-container.validation-run-locked #header-back-btn,
+.app-container.report-approval-locked .test-card,
+.app-container.report-approval-locked #report-preview-actions .btn-close,
+.app-container.report-approval-locked #page-report-preview .btn-close,
+.app-container.report-approval-locked #page-report-preview .btn-secondary {
+    pointer-events: none;
+    cursor: not-allowed;
+}
+
+.app-container.report-approval-locked .nav-item[data-page],
+.app-container.validation-run-locked .nav-item[data-page],
+.app-container.test-run-locked .nav-item[data-page] {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
+/* Tap Density parity: lock entire sidebar while a run is active */
+.sidebar.sidebar-locked {
+    pointer-events: none;
+    opacity: 0.6;
+}
+
+
+/* ===== Friability Tester styles ===== */
+.test-run-page {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;

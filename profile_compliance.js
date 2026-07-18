@@ -1219,11 +1219,15 @@ function refreshShellAccessVisibility() {
         valSettingsCard.style.display = showVal ? '' : 'none';
     }
     if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
+    if (typeof refreshReportsActionButtons === 'function') refreshReportsActionButtons();
+    if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
 }
 
 function updateUIForUser() {
     refreshShellAccessVisibility();
     if (typeof refreshReportsActionButtons === 'function') refreshReportsActionButtons();
+    if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
+    if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
     var user = window.currentUser || (typeof currentUser !== 'undefined' ? currentUser : null);
     if (!user) return;
     var profileNameEl = document.getElementById('profile-name-display');

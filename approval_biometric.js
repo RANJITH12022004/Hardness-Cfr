@@ -520,9 +520,44 @@ function isCurrentUserReportOperator(preview) {
     return !!(op && cur && op === cur);
 }
 
-/** Navigation is not restricted while a report awaits approval; lock is always off. */
+function isReportPreviewNavigationLocked(preview) {
+    var p = preview || window._lastReportPreview || {};
+    var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
+    // Hardness includes calibration reports in the pending-approval navigation lock.
+    if (reportTypeNorm !== 'test' && reportTypeNorm !== 'validation' && reportTypeNorm !== 'calibration') return false;
+    return isReportPendingApproval(p);
+}
+
+/** @deprecated Use isReportPreviewNavigationLocked for navigation; kept for compatibility. */
 function isReportPreviewLockedForCurrentUser(preview) {
-    return false;
+    return isReportPreviewNavigationLocked(preview);
+}
+
+function hasActiveReportApprovalGate() {
+    return !!(window._reportApprovalGate && window._reportApprovalGate.reportId != null);
+}
+
+function guardReportPreviewNavigation(targetPage) {
+    if (!isReportPreviewNavigationLocked(window._lastReportPreview)) return false;
+    if (targetPage === 'report-preview') return false;
+    if (typeof showAppModal === 'function') {
+        showAppModal(
+            'This report is awaiting approval. Complete Pass/Fail and sign on this screen, or power off will save it as Aborted (power interruption).',
+            'Report'
+        );
+    } else {
+        alert('This report is awaiting approval. Complete Pass/Fail and sign before leaving.');
+    }
+    var active = document.querySelector('.page.active');
+    if (!active || active.id !== 'page-report-preview') {
+        var rid = (typeof currentReportId !== 'undefined' ? currentReportId : null) ||
+            (window._reportApprovalGate && window._reportApprovalGate.reportId);
+        if (rid && typeof openReportPreview === 'function') openReportPreview(rid);
+    } else {
+        if (typeof scrollReportApprovePanelIntoView === 'function') scrollReportApprovePanelIntoView();
+        if (typeof scrollReportPendingBannerIntoView === 'function') scrollReportPendingBannerIntoView();
+    }
+    return true;
 }
 
 function setReportApprovalGate(reportId, operatedByUsername) {
@@ -539,10 +574,48 @@ function setReportApprovalGate(reportId, operatedByUsername) {
 function clearReportApprovalGate() {
     window._reportApprovalGate = null;
     stopReportApprovalPoll();
+    if (typeof clearHardnessTestRunCheckpoint === 'function') clearHardnessTestRunCheckpoint();
 }
 
 function setReportApprovalGateFromPreview(preview, reportId) {
-    clearReportApprovalGate();
+    if (!isReportPendingApproval(preview)) {
+        clearReportApprovalGate();
+        return;
+    }
+    var reportTypeNorm = String((preview || {}).type || 'test').trim().toLowerCase();
+    if (reportTypeNorm === 'test' || reportTypeNorm === 'validation' || reportTypeNorm === 'calibration') {
+        setReportApprovalGate(reportId, getReportOperatedByUsername(preview));
+    } else {
+        clearReportApprovalGate();
+    }
+}
+
+function clearSidebarInteractionLock() {
+    var app = document.querySelector('.app-container');
+    if (app) app.classList.remove('report-approval-locked');
+    if (typeof resetReportPreviewNavigationUi === 'function') resetReportPreviewNavigationUi();
+}
+
+function reapplyReportPreviewLockIfNeeded() {
+    if (!hasActiveReportApprovalGate()) {
+        clearSidebarInteractionLock();
+        return;
+    }
+    var rid = window._reportApprovalGate.reportId;
+    if (rid == null) return;
+    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+    apiRequest(base + '/api/reports/' + rid + '/preview').then(function (data) {
+        if (!data || !data.preview) return;
+        window._lastReportPreview = data.preview;
+        if (typeof currentReportId !== 'undefined') currentReportId = rid;
+        setReportApprovalGateFromPreview(data.preview, rid);
+        applyReportPreviewLockUi(data.preview);
+        if (typeof startReportApprovalPollIfLocked === 'function') startReportApprovalPollIfLocked();
+        var active = document.querySelector('.page.active');
+        if (!active || active.id !== 'page-report-preview') {
+            if (typeof openReportPreview === 'function') openReportPreview(rid);
+        }
+    }).catch(function () {});
 }
 
 function stopReportApprovalPoll() {
@@ -735,14 +808,47 @@ function resetReportPreviewNavigationUi() {
 
 function applyReportPreviewLockUi(preview) {
     preview = preview || window._lastReportPreview;
-    resetReportPreviewNavigationUi();
-    var pending = isReportPendingApproval(preview);
-    var reportTypeNorm = getReportTypeNorm(preview);
-    var showBanner = pending && reportTypeRequiresApproval(reportTypeNorm);
+    var locked = isReportPreviewNavigationLocked(preview);
+    var app = document.querySelector('.app-container');
+    if (app) app.classList.toggle('report-approval-locked', !!locked);
     var banner = document.getElementById('report-pending-lock-banner');
-    if (banner) banner.style.display = showBanner ? 'block' : 'none';
-    updateReportApprovePanelForPreview(preview);
-    updateReportPreviewPrintExportButtons(preview);
+    if (banner) banner.style.display = locked ? 'block' : 'none';
+    var closeBtn = document.querySelector('#report-preview-actions .btn-close');
+    if (closeBtn) closeBtn.style.display = locked ? 'none' : '';
+    var backBtn = document.getElementById('header-back-btn');
+    if (backBtn) backBtn.style.visibility = locked ? 'hidden' : '';
+    var logoEl = document.getElementById('header-logo');
+    if (logoEl) {
+        logoEl.style.pointerEvents = locked ? 'none' : '';
+        logoEl.style.opacity = locked ? '0.45' : '';
+    }
+    document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
+        btn.style.pointerEvents = locked ? 'none' : '';
+        btn.style.opacity = locked ? '0.45' : '';
+        if (locked) btn.setAttribute('aria-disabled', 'true');
+        else btn.removeAttribute('aria-disabled');
+    });
+    var profileEl = document.querySelector('.sidebar .user-profile');
+    var logoutBtn = document.querySelector('.sidebar .logout-btn');
+    [profileEl, logoutBtn].forEach(function (el) {
+        if (!el) return;
+        el.style.pointerEvents = locked ? 'none' : '';
+        el.style.opacity = locked ? '0.45' : '';
+        if (locked) el.setAttribute('aria-disabled', 'true');
+        else el.removeAttribute('aria-disabled');
+    });
+    document.querySelectorAll('.test-card').forEach(function (el) {
+        el.style.pointerEvents = locked ? 'none' : '';
+        el.style.opacity = locked ? '0.45' : '';
+    });
+    document.querySelectorAll('#page-report-preview .btn-close, #page-report-preview .btn-secondary').forEach(function (el) {
+        el.style.pointerEvents = locked ? 'none' : '';
+        el.style.opacity = locked ? '0.45' : '';
+        if (locked) el.setAttribute('aria-disabled', 'true');
+        else el.removeAttribute('aria-disabled');
+    });
+    if (typeof updateReportApprovePanelForPreview === 'function') updateReportApprovePanelForPreview(preview);
+    if (typeof updateReportPreviewPrintExportButtons === 'function') updateReportPreviewPrintExportButtons(preview);
 }
 
 function stampOperatorOnTestReportPayload(payload) {

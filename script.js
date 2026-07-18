@@ -286,9 +286,18 @@ function goToPage(pageName) {
         }
     }
 
+    if (typeof guardReportPreviewNavigation === 'function' && guardReportPreviewNavigation(pageName)) {
+        return;
+    }
+    if (window._mandatoryPasswordResetPending && pageName !== 'password-expired-reset' && pageName !== 'login') {
+        if (typeof showAppModal === 'function') showAppModal('Please reset your password to continue.', 'Reset Password');
+        else alert('Please reset your password to continue.');
+        return;
+    }
     if (pageName !== 'report-preview') {
-        if (typeof resetReportPreviewNavigationUi === 'function') resetReportPreviewNavigationUi();
-        if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+        if (typeof resetReportPreviewNavigationUi === 'function' && typeof hasActiveReportApprovalGate === 'function' && !hasActiveReportApprovalGate()) {
+            resetReportPreviewNavigationUi();
+        }
     }
 
     // Special handling for login screen
@@ -453,7 +462,11 @@ function goToPage(pageName) {
         'test-run': 'Test Run',
         'factory-settings': 'Factory Settings',
         'factory-support': 'Factory Support',
-        'factory-support-result': 'Factory Support'
+        'factory-support-result': 'Factory Support',
+        'export': 'Export',
+        'ip-configure': 'IP Configure',
+        'disable-recipes': 'Disabled Recipes',
+        'password-expired-reset': 'Reset Password'
     };
 
     const titleElement = document.querySelector('.page-title');
@@ -552,7 +565,35 @@ function goToPage(pageName) {
     }
 
     // Initialize factory settings when navigating to factory-settings page
-    if (pageName === 'factory-settings') {
+    
+    if (pageName === 'ip-configure') {
+        setTimeout(function () {
+            if (typeof refreshIpConfigureAddresses === 'function') refreshIpConfigureAddresses();
+        }, 50);
+    }
+    if (pageName === 'disable-recipes') {
+        setTimeout(function () {
+            if (typeof loadDisableRecipes === 'function') loadDisableRecipes();
+        }, 50);
+    }
+    if (pageName === 'export') {
+        setTimeout(function () {
+            if (typeof refreshReportsActionButtons === 'function') refreshReportsActionButtons();
+        }, 50);
+    }
+    if (pageName === 'settings') {
+        setTimeout(function () {
+            if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
+        }, 0);
+    }
+    if (pageName === 'reports') {
+        setTimeout(function () {
+            if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
+            if (typeof refreshReportsActionButtons === 'function') refreshReportsActionButtons();
+        }, 0);
+    }
+
+if (pageName === 'factory-settings') {
         setTimeout(() => {
             if (typeof initFactorySettings === 'function') {
                 initFactorySettings();
@@ -700,6 +741,59 @@ var FACTORY_PASSWORD = 'Rahul';
 var FACTORY_USER = { id: 0, name: 'Factory', username: FACTORY_USERNAME, role: 'Factory' };
 
 // ===== LOGIN & AUTHENTICATION =====
+function showLoginScreen() {
+    var login = document.getElementById('page-login');
+    var app = document.querySelector('.app-container');
+    if (app) {
+        app.style.display = 'none';
+        app.classList.remove('report-approval-locked');
+    }
+    if (login) {
+        login.style.display = 'flex';
+        login.classList.add('active');
+    }
+    if (typeof clearSidebarInteractionLock === 'function') clearSidebarInteractionLock();
+    if (typeof stopAutoLogoutWatcher === 'function') stopAutoLogoutWatcher();
+    resetLoginFormFields();
+    var loginUid = document.getElementById('login-uid');
+    var loginPwd = document.getElementById('login-pwd');
+    if (loginUid) loginUid.tabIndex = 0;
+    if (loginPwd) loginPwd.tabIndex = 0;
+    if (typeof updateFactorySettingsDisplays === 'function') updateFactorySettingsDisplays();
+}
+
+function resetLoginFormFields() {
+    var loginUid = document.getElementById('login-uid');
+    var loginPwd = document.getElementById('login-pwd');
+    if (loginUid) loginUid.value = '';
+    if (loginPwd) loginPwd.value = '';
+}
+
+function showAppContainer() {
+    var login = document.getElementById('page-login');
+    var app = document.querySelector('.app-container');
+    if (login) {
+        login.style.display = 'none';
+        login.classList.remove('active');
+    }
+    var loginUidOff = document.getElementById('login-uid');
+    var loginPwdOff = document.getElementById('login-pwd');
+    if (loginUidOff) loginUidOff.tabIndex = -1;
+    if (loginPwdOff) loginPwdOff.tabIndex = -1;
+    if (app) app.style.display = 'flex';
+    if (typeof reapplyReportPreviewLockIfNeeded === 'function') reapplyReportPreviewLockIfNeeded();
+    else if (typeof clearSidebarInteractionLock === 'function') clearSidebarInteractionLock();
+    if (typeof initHardwareStream === 'function') initHardwareStream();
+    if (window.currentUser && (window.currentUser.username || window.currentUser.name)) {
+        if (typeof ensureAutoLogoutWatcher === 'function') ensureAutoLogoutWatcher();
+    }
+    setTimeout(function () {
+        if (typeof refreshShellAccessVisibility === 'function') refreshShellAccessVisibility();
+        if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
+        if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
+    }, 0);
+}
+
 async function login() {
     const uidEl = document.getElementById('login-uid');
     const pwdEl = document.getElementById('login-pwd');
@@ -711,20 +805,53 @@ async function login() {
         return;
     }
 
+    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
     try {
-        const result = await apiRequest('/api/data/auth/login', {
+        var res = await fetch(base + '/api/data/auth/login', {
             method: 'POST',
-            body: JSON.stringify({ username, password })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: username, password: password })
         });
-        const user = (result && result.user) ? result.user : null;
-        if (user) {
-            setLoggedInUser(user, uidEl, pwdEl);
+        var ct = res.headers.get('content-type') || '';
+        var data = {};
+        if (ct.indexOf('json') !== -1) {
+            data = await res.json();
+        } else {
+            data = { error: await res.text() };
+        }
+        if (res.ok && data.success && data.user) {
+            setLoggedInUser(data.user, uidEl, pwdEl);
             return;
         }
-        alert('Invalid username or password');
+        var msg = data.error || '';
+        var remaining = (typeof data.remainingAttempts === 'number') ? data.remainingAttempts : null;
+        if (res.status === 403 && data && data.passwordChangeRequired) {
+            if (typeof showMandatoryPasswordResetScreen === 'function') showMandatoryPasswordResetScreen(data.username || username);
+            else alert(msg || 'Password reset required.');
+            return;
+        }
+        if (res.status === 403 && data && data.passwordExpired) {
+            if (typeof showPasswordExpiredResetScreen === 'function') showPasswordExpiredResetScreen(data.username || username, password);
+            else alert(msg || 'Password expired.');
+            return;
+        }
+        if (res.status === 401) {
+            if (remaining != null && remaining > 0) {
+                msg = 'Incorrect password. ' + remaining + ' tr' + (remaining === 1 ? 'y' : 'ies') + ' remaining.';
+            } else {
+                msg = msg || 'Invalid username or password.';
+            }
+        } else if (res.status === 403) {
+            msg = msg || 'Account locked. Contact admin.';
+        } else if (!msg) {
+            msg = 'Login failed (HTTP ' + res.status + ').';
+        }
+        if (typeof showAppModal === 'function') showAppModal(msg, 'Login Failed');
+        else alert(msg);
     } catch (e) {
-        const msg = (e && e.message) ? e.message : 'Login failed';
-        alert(msg);
+        var emsg = 'Login failed: ' + (e && e.message ? e.message : 'Network error');
+        if (typeof showAppModal === 'function') showAppModal(emsg, 'Login Error');
+        else alert(emsg);
     }
 }
 window.login = login;
@@ -732,17 +859,30 @@ window.login = login;
 function setLoggedInUser(loggedInUser, uidEl, pwdEl) {
     currentUser = loggedInUser;
     window.currentUser = loggedInUser;
+    window._mandatoryPasswordResetPending = false;
     try {
         localStorage.setItem('currentUser', JSON.stringify(loggedInUser));
     } catch (e) {
         console.warn('Failed to save currentUser to localStorage:', e);
     }
+    if (uidEl) uidEl.value = '';
+    if (pwdEl) pwdEl.value = '';
+    showAppContainer();
     if (typeof updateUIForUser === 'function') {
         updateUIForUser();
     }
-    if (uidEl) uidEl.value = '';
-    if (pwdEl) pwdEl.value = '';
+    if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
+    if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
+    if (typeof ensureAutoLogoutWatcher === 'function') ensureAutoLogoutWatcher();
     if (typeof sendTareOncePerSession === 'function') sendTareOncePerSession('login');
+    // Load factory settings for auto-logout minutes after real login
+    try {
+        var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+        fetch(base + '/api/data/factory-settings').then(function (r) { return r.ok ? r.json() : null; }).then(function (data) {
+            var settings = (data && (data.settings || data)) || null;
+            if (settings && typeof applyFactoryAutoLogoutSetting === 'function') applyFactoryAutoLogoutSetting(settings);
+        }).catch(function () {});
+    } catch (e) {}
     goToPage('home');
 }
 
@@ -3417,8 +3557,48 @@ var testRunManualWaitingForStart = false;
 var testRunManualContinueResolve = null;
 var backoffAbortHandled = false;
 
+function clearHardnessTestRunCheckpoint() {
+    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+    var req = (typeof apiRequest === 'function')
+        ? apiRequest(base + '/api/data/test-run/checkpoint', { method: 'DELETE' })
+        : fetch(base + '/api/data/test-run/checkpoint', { method: 'DELETE' });
+    Promise.resolve(req).catch(function () {});
+}
+
+function putHardnessTestRunCheckpoint(phase, extra) {
+    try {
+        var payload = Object.assign({
+            type: 'test',
+            productName: (lastTestRunRecipe && (lastTestRunRecipe.productName || lastTestRunRecipe.name)) || '',
+            recipeId: lastTestRunRecipe && lastTestRunRecipe.id,
+            batchNumber: lastTestRunRecipe && (lastTestRunRecipe.batchNumber || lastTestRunRecipe.batch),
+            _checkpointAt: new Date().toISOString(),
+            _checkpointPhase: phase || 'running'
+        }, extra || {});
+        if (typeof stampOperatorOnTestReportPayload === 'function') {
+            stampOperatorOnTestReportPayload(payload);
+        }
+        var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+        var req = (typeof apiRequest === 'function')
+            ? apiRequest(base + '/api/data/test-run/checkpoint', { method: 'PUT', body: payload })
+            : fetch(base + '/api/data/test-run/checkpoint', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+        return Promise.resolve(req).catch(function () { return null; });
+    } catch (e) {
+        return Promise.resolve(null);
+    }
+}
+
 function handleTestReportSavedNavigation(reportId) {
     try {
+        if (reportId != null) {
+            putHardnessTestRunCheckpoint('awaiting-approval', { _pendingReportId: reportId });
+        } else {
+            clearHardnessTestRunCheckpoint();
+        }
         if (typeof finishTestRunReportSaved === 'function') {
             finishTestRunReportSaved(reportId);
         } else if (reportId && typeof openReportPreview === 'function') {
@@ -3936,6 +4116,7 @@ async function runHardnessTestLoop() {
 
     if (typeof backoffAbortHandled !== 'undefined' && backoffAbortHandled) {
         backoffAbortHandled = false;
+        if (typeof clearHardnessTestRunCheckpoint === 'function') clearHardnessTestRunCheckpoint();
         return;
     }
 
@@ -4004,6 +4185,9 @@ function toggleTestRunState() {
 
         testRunActive = true;
         lockNavigation();
+        if (typeof putHardnessTestRunCheckpoint === 'function') {
+            putHardnessTestRunCheckpoint('running');
+        }
         testRunPaused = false;
         testRunAborted = false;
         runHardnessTestLoop();
@@ -6073,6 +6257,214 @@ function performAutoLogoutDueToInactivity() {
     }, 200);
 }
 
+
+function updateSettingsVisibility() {
+    var u = window.currentUser;
+    var role = typeof getCurrentRole === 'function' ? getCurrentRole() : '';
+    var rl = String(role || '').toLowerCase();
+    function showIf(sel, featureKey) {
+        var el = document.querySelector(sel);
+        if (!el) return;
+        var ok = u && typeof canAccess === 'function' ? canAccess(u, featureKey) : false;
+        el.style.display = ok ? '' : 'none';
+    }
+    showIf('.settings-datetime', 'edit-datetime');
+    showIf('.settings-recipes', 'recipe-list');
+    var disableCard = document.querySelector('.settings-disable');
+    if (disableCard) {
+        var showDisable =
+            (u && typeof canAccess === 'function' && canAccess(u, 'disable-recipes')) ||
+            rl === 'factory';
+        disableCard.style.display = showDisable ? '' : 'none';
+    }
+    var valCard = document.querySelector('.settings-validation');
+    if (valCard) {
+        var showVal = u && typeof canAccessValidationOrCalibration === 'function'
+            ? canAccessValidationOrCalibration(u)
+            : (u && typeof canAccess === 'function' && canAccess(u, 'validation-test'));
+        valCard.style.display = showVal ? '' : 'none';
+    }
+    var factoryCard = document.querySelector('.settings-factory');
+    if (factoryCard) factoryCard.style.display = rl === 'factory' ? '' : 'none';
+    var factorySupportCard = document.querySelector('.settings-factory-support');
+    if (factorySupportCard) factorySupportCard.style.display = rl === 'factory' ? '' : 'none';
+    var resetCard = document.querySelector('.settings-reset');
+    if (resetCard) resetCard.style.display = rl === 'factory' ? '' : 'none';
+    var ipCard = document.querySelector('.settings-ip-configure');
+    if (ipCard) ipCard.style.display = '';
+}
+
+function exportFromSelection(type) {
+    if (type === 'audit') {
+        if (typeof exportAuditTrails === 'function') exportAuditTrails();
+        return;
+    }
+    if (typeof exportFilteredReports === 'function') {
+        // Ensure filter is not stuck on audit
+        if (typeof currentReportFilter !== 'undefined' && currentReportFilter === 'audit') {
+            currentReportFilter = 'all';
+        }
+        exportFilteredReports();
+        return;
+    }
+    goToPage('reports');
+}
+
+function _escapeIpConfigureText(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function _renderIpConfigureList(payload) {
+    var listEl = document.getElementById('ip-configure-list');
+    if (!listEl) return;
+    if (!payload || payload.ok === false) {
+        var errMsg = (payload && (payload.error || payload.message)) ? (payload.error || payload.message) : 'Could not load network information.';
+        listEl.innerHTML = '<div class="ip-configure-error">' + _escapeIpConfigureText(errMsg) + '</div>';
+        return;
+    }
+    var wlan = payload.wlan != null && payload.wlan !== '' ? String(payload.wlan) : null;
+    var lan = payload.lan != null && payload.lan !== '' ? String(payload.lan) : null;
+    if (!wlan && !lan) {
+        listEl.innerHTML = '<div class="ip-configure-empty">No IP address found. Check that this device is connected to the LAN or WLAN.</div>';
+        return;
+    }
+    var rows = [
+        { label: 'WLAN', address: wlan || '—' },
+        { label: 'LAN', address: lan || '—' }
+    ];
+    var html = '';
+    rows.forEach(function (row) {
+        html += '<div class="ip-configure-row">' +
+            '<span class="ip-configure-iface">' + _escapeIpConfigureText(row.label) + '</span>' +
+            '<span class="ip-configure-address">' + _escapeIpConfigureText(row.address) + '</span>' +
+            '</div>';
+    });
+    listEl.innerHTML = html;
+}
+
+function refreshIpConfigureAddresses() {
+    var listEl = document.getElementById('ip-configure-list');
+    var refreshBtn = document.querySelector('.btn-refresh-ip-configure');
+    if (listEl) {
+        listEl.innerHTML = '<div class="ip-configure-loading">Loading addresses…</div>';
+    }
+    if (refreshBtn) refreshBtn.disabled = true;
+    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+    fetch(base + '/api/system/network-addresses')
+        .then(function (res) {
+            return res.json().catch(function () { return { ok: false, error: 'Invalid response from server.' }; })
+                .then(function (data) {
+                    if (!res.ok && data && !data.error) {
+                        data.ok = false;
+                        data.error = data.error || ('Request failed (' + res.status + ').');
+                    }
+                    return data;
+                });
+        })
+        .then(function (data) {
+            _renderIpConfigureList(data);
+        })
+        .catch(function () {
+            _renderIpConfigureList({ ok: false, error: 'Could not reach the device network service.' });
+        })
+        .finally(function () {
+            if (refreshBtn) refreshBtn.disabled = false;
+        });
+}
+
+function formatDisabledRecipeTimestamp(iso) {
+    if (!iso) return '--';
+    try {
+        var d = new Date(iso);
+        if (isNaN(d.getTime())) return String(iso);
+        var dd = String(d.getDate()).padStart(2, '0');
+        var mm = String(d.getMonth() + 1).padStart(2, '0');
+        var yyyy = d.getFullYear();
+        var hh = String(d.getHours()).padStart(2, '0');
+        var mi = String(d.getMinutes()).padStart(2, '0');
+        return dd + '/' + mm + '/' + yyyy + ' ' + hh + ':' + mi;
+    } catch (e) {
+        return String(iso);
+    }
+}
+
+function loadDisableRecipes() {
+    var msgEl = document.getElementById('disable-recipes-message');
+    var tableEl = document.querySelector('#page-disable-recipes .manage-recipes-table');
+    var tbody = document.getElementById('disable-recipes-table-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+    var req = (typeof apiRequest === 'function')
+        ? apiRequest(base + '/api/data/recipes/disabled')
+        : fetch(base + '/api/data/recipes/disabled').then(function (r) { return r.json(); });
+    Promise.resolve(req).then(function (data) {
+        var disabled = (data && data.recipes) ? data.recipes : [];
+        if (!disabled.length) {
+            if (msgEl) {
+                msgEl.textContent = 'No disabled recipes.';
+                msgEl.style.display = '';
+            }
+            if (tableEl) tableEl.style.display = 'none';
+            return;
+        }
+        if (msgEl) msgEl.style.display = 'none';
+        if (tableEl) tableEl.style.display = '';
+        disabled.forEach(function (r) {
+            var tr = document.createElement('tr');
+            var name = r.productName || r.name || '--';
+            var shape = r.shape || r.tabletShape || '--';
+            var disabledBy = r.disabledBy || r.disabledByUsername || '--';
+            var disabledAt = formatDisabledRecipeTimestamp(r.disabledAt);
+            var id = r.id;
+            var canEnable = window.currentUser && typeof canAccess === 'function' &&
+                (canAccess(window.currentUser, 'recipe-enable') || canAccess(window.currentUser, 'disable-recipes') || canAccess(window.currentUser, 'recipe-manage'));
+            var actions = canEnable
+                ? ('<button type="button" class="btn btn-primary btn-sm" onclick="enableDisabledRecipe(' + id + ')">Enable</button>')
+                : '--';
+            tr.innerHTML =
+                '<td>' + name + '</td>' +
+                '<td>' + shape + '</td>' +
+                '<td>' + disabledBy + '</td>' +
+                '<td>' + disabledAt + '</td>' +
+                '<td class="actions-cell">' + actions + '</td>';
+            tbody.appendChild(tr);
+        });
+    }).catch(function (err) {
+        if (msgEl) {
+            msgEl.textContent = 'Unable to load disabled recipes.';
+            msgEl.style.display = '';
+        }
+        if (tableEl) tableEl.style.display = 'none';
+    });
+}
+
+function enableDisabledRecipe(recipeId) {
+    if (recipeId == null) return;
+    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+    var req = (typeof apiRequest === 'function')
+        ? apiRequest(base + '/api/data/recipes/' + recipeId + '/enable', { method: 'POST', body: {} })
+        : fetch(base + '/api/data/recipes/' + recipeId + '/enable', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}'
+        }).then(function (r) { return r.json().then(function (b) { if (!r.ok) throw new Error(b.error || 'Enable failed'); return b; }); });
+    Promise.resolve(req).then(function (res) {
+        if (typeof showAppModal === 'function') showAppModal('Recipe re-enabled.', 'Recipes');
+        else alert('Recipe re-enabled.');
+        loadDisableRecipes();
+    }).catch(function (e) {
+        var msg = (e && e.message) ? e.message : 'Enable failed';
+        if (typeof showAppModal === 'function') showAppModal(msg, 'Recipes');
+        else alert(msg);
+    });
+}
+
+
 function canViewAuditLog() {
     var u = window.currentUser;
     if (!u) return false;
@@ -6086,37 +6478,81 @@ function initAuditReportsVisibility() {
     if (auditBtn) auditBtn.style.display = canViewAuditLog() ? '' : 'none';
 }
 
-function showPasswordExpiredResetScreen(username) {
+function showPasswordExpiredResetScreen(username, oldPassword) {
     window._passwordExpiredUsername = username || '';
     window._mandatoryPasswordResetPending = false;
+    window._passwordResetScreenMode = 'expired';
+    var titleEl = document.getElementById('password-reset-page-title');
+    var subEl = document.getElementById('password-reset-page-subtitle');
+    if (titleEl) titleEl.textContent = 'Reset Expired Password';
+    if (subEl) subEl.textContent = 'Your password has expired. Set a new password to continue.';
+    var login = document.getElementById('page-login');
+    var app = document.querySelector('.app-container');
+    if (login) login.style.display = 'none';
+    if (app) app.style.display = 'flex';
     if (typeof goToPage === 'function') goToPage('password-expired-reset');
+    setTimeout(function () {
+        var userEl = document.getElementById('expired-reset-username');
+        var oldEl = document.getElementById('expired-reset-old-password');
+        var newEl = document.getElementById('expired-reset-new-password');
+        var confEl = document.getElementById('expired-reset-confirm-password');
+        if (userEl) userEl.value = username || '';
+        if (oldEl) oldEl.value = oldPassword || '';
+        if (newEl) newEl.value = '';
+        if (confEl) confEl.value = '';
+        if (newEl && typeof newEl.focus === 'function') newEl.focus();
+    }, 60);
 }
 
 function showMandatoryPasswordResetScreen(username) {
     window._passwordExpiredUsername = username || '';
     window._mandatoryPasswordResetPending = true;
+    window._passwordResetScreenMode = 'mandatory';
+    var titleEl = document.getElementById('password-reset-page-title');
+    var subEl = document.getElementById('password-reset-page-subtitle');
+    if (titleEl) titleEl.textContent = 'Reset your password';
+    if (subEl) subEl.textContent = 'Your account was created with a temporary password. Choose a new password before you can use the app.';
+    var login = document.getElementById('page-login');
+    var app = document.querySelector('.app-container');
+    if (login) login.style.display = 'none';
+    if (app) app.style.display = 'flex';
     if (typeof goToPage === 'function') goToPage('password-expired-reset');
+    setTimeout(function () {
+        var userEl = document.getElementById('expired-reset-username');
+        if (userEl) userEl.value = username || '';
+    }, 60);
+}
+
+function submitPasswordResetFromLoginPage() {
+    if (typeof submitExpiredPasswordReset === 'function') return submitExpiredPasswordReset();
 }
 
 function submitExpiredPasswordReset() {
-    var user = window._passwordExpiredUsername || '';
-    var p1 = (document.getElementById('password-expired-new') || document.getElementById('pwd-reset-new') || {}).value || '';
-    var p2 = (document.getElementById('password-expired-confirm') || document.getElementById('pwd-reset-confirm') || {}).value || '';
+    var user = window._passwordExpiredUsername ||
+        ((document.getElementById('expired-reset-username') || {}).value || '');
+    var oldPwd = (document.getElementById('expired-reset-old-password') || {}).value || '';
+    var p1 = (document.getElementById('expired-reset-new-password') ||
+        document.getElementById('password-expired-new') || document.getElementById('pwd-reset-new') || {}).value || '';
+    var p2 = (document.getElementById('expired-reset-confirm-password') ||
+        document.getElementById('password-expired-confirm') || document.getElementById('pwd-reset-confirm') || {}).value || '';
     if (!p1 || p1 !== p2) { alert('Passwords do not match.'); return; }
     var endpoint = window._mandatoryPasswordResetPending
         ? '/api/data/auth/mandatory-password-reset'
         : '/api/data/auth/password-expired-reset';
     var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+    var payload = { username: user, newPassword: p1, confirmPassword: p2 };
+    if (oldPwd) payload.oldPassword = oldPwd;
     fetch(base + endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: user, newPassword: p1, confirmPassword: p2 })
+        body: JSON.stringify(payload)
     }).then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
       .then(function (res) {
         if (res.ok && res.body && (res.body.success || res.body.ok)) {
             window._mandatoryPasswordResetPending = false;
             alert('Password updated. Please log in.');
-            if (typeof goToPage === 'function') goToPage('login');
+            if (typeof showLoginScreen === 'function') showLoginScreen();
+            else if (typeof goToPage === 'function') goToPage('login');
         } else {
             alert((res.body && (res.body.error || res.body.message)) || 'Password reset failed');
         }
@@ -6124,13 +6560,24 @@ function submitExpiredPasswordReset() {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
-    try {
-        var cu = null;
-        try { cu = JSON.parse(localStorage.getItem('currentUser') || 'null'); } catch (e) {}
-        if (cu && (cu.username || cu.name)) {
-            window.currentUser = cu;
-            if (typeof ensureAutoLogoutWatcher === 'function') ensureAutoLogoutWatcher();
-        }
-        if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
-    } catch (e) {}
+    function resetKioskSessionAndShowLogin() {
+        try { localStorage.removeItem('currentUser'); } catch (e) {}
+        window.currentUser = null;
+        if (typeof currentUser !== 'undefined') currentUser = null;
+        if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+        window._lastReportPreview = null;
+        window._mandatoryPasswordResetPending = false;
+        var app = document.querySelector('.app-container');
+        if (app) app.classList.remove('report-approval-locked');
+        if (typeof clearSidebarInteractionLock === 'function') clearSidebarInteractionLock();
+        var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+        var resetUrl = base + '/api/data/auth/session-ui-reset';
+        fetch(resetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+            .catch(function () {})
+            .finally(function () {
+                if (typeof showLoginScreen === 'function') showLoginScreen();
+                else if (typeof goToPage === 'function') goToPage('login');
+            });
+    }
+    resetKioskSessionAndShowLogin();
 });
