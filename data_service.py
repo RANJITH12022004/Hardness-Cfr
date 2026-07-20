@@ -223,8 +223,13 @@ def _get_storage_path(filename: str) -> pathlib.Path:
     return _storage_dir / safe_name
 
 
-def _load_json_file(filepath: pathlib.Path, default=None):
-    if default is None:
+# Sentinel so callers can pass default=None (e.g. current user session) without it
+# being rewritten to []. Historically default=None meant "use []" for list files.
+_LOAD_JSON_USE_LIST_DEFAULT = object()
+
+
+def _load_json_file(filepath: pathlib.Path, default=_LOAD_JSON_USE_LIST_DEFAULT):
+    if default is _LOAD_JSON_USE_LIST_DEFAULT:
         default = []
     if not filepath.exists():
         return default
@@ -1306,10 +1311,17 @@ def save_current_user(user: Dict[str, Any]):
 def get_current_user() -> Optional[Dict[str, Any]]:
     """Get current logged-in user."""
     global _current_user
-    if _current_user:
+    if isinstance(_current_user, dict) and _current_user:
         return _current_user
     session_path = _get_storage_path("current_user.json")
-    _current_user = _load_json_file(session_path, default=None)
+    loaded = _load_json_file(session_path, default=None)
+    # Only a real user object counts — never [], "", or other JSON leftovers.
+    # (VFAT + older _load_json_file(default=None)->[] caused empty-list "sessions"
+    # that the UI treated as logged-in because [] is truthy in JavaScript.)
+    if isinstance(loaded, dict) and (loaded.get("username") or loaded.get("name")):
+        _current_user = loaded
+    else:
+        _current_user = None
     return _current_user
 
 

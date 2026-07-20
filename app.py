@@ -2837,8 +2837,14 @@ def approval_verify():
 def get_current_user_route():
     try:
         user = data_service.refresh_current_user_from_member() or data_service.get_current_user()
-        if user:
+        # Never return a non-dict (e.g. [] from legacy JSON defaults) — browsers treat
+        # empty arrays as truthy and would skip the login screen.
+        if not isinstance(user, dict):
+            user = None
+        elif user:
             user = data_service.sanitize_member_for_client(user) or user
+            if not isinstance(user, dict):
+                user = None
         return jsonify({"user": user}), 200
     except Exception as e:
         app.logger.exception("Error getting current user")

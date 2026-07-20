@@ -1147,7 +1147,10 @@ function refreshSessionUserFromServer() {
     return apiRequest(API_BASE + '/api/data/auth/current-user', { method: 'GET' })
         .then(function (data) {
             var user = data && data.user ? data.user : null;
-            if (!user) return null;
+            // [] is truthy in JS but is not a session (legacy API bug).
+            if (!user || typeof user !== 'object' || Array.isArray(user) || !(user.username || user.name)) {
+                return null;
+            }
             if (typeof window !== 'undefined') window.currentUser = user;
             if (typeof currentUser !== 'undefined') currentUser = user;
             try {
@@ -1162,22 +1165,29 @@ function refreshSessionUserFromServer() {
         });
 }
 
-/** On page load: restore server session with fresh permissions, or show login. */
+/**
+ * On page load / refresh: always require a fresh login (TapDensity/Friability CFR).
+ * Never restore server or localStorage session into the UI.
+ */
 function initAppSessionOnLoad() {
-    return refreshSessionUserFromServer().then(function (user) {
-        if (user && typeof goToPage === 'function') {
-            goToPage('home');
-            return user;
-        }
-        if (typeof currentUser !== 'undefined') currentUser = null;
-        if (typeof window !== 'undefined') window.currentUser = null;
-        try {
-            localStorage.removeItem('currentUser');
-        } catch (e) { /* ignore */ }
-        if (typeof goToPage === 'function') goToPage('login');
-        return null;
+    try { localStorage.removeItem('currentUser'); } catch (e) { /* ignore */ }
+    if (typeof currentUser !== 'undefined') currentUser = null;
+    if (typeof window !== 'undefined') window.currentUser = null;
+    if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+    window._lastReportPreview = null;
+    window._mandatoryPasswordResetPending = false;
+    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+    var resetUrl = base + '/api/data/auth/session-ui-reset';
+    return fetch(resetUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
     }).catch(function () {
-        if (typeof goToPage === 'function') goToPage('login');
+        return null;
+    }).finally(function () {
+        if (typeof showLoginScreen === 'function') showLoginScreen();
+        else if (typeof goToPage === 'function') goToPage('login');
+    }).then(function () {
         return null;
     });
 }
