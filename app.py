@@ -398,7 +398,7 @@ def _abort_pending_reports_after_power_loss(session_username=None):
     aborted = 0
     for report in data_service.list_reports("all", include_pending=True) or []:
         rtype = (report.get("type") or "").strip().lower()
-        if rtype not in ("test", "validation"):
+        if rtype not in ("test", "validation", "calibration"):
             continue
         if (report.get("reportApprovalStatus") or "").strip().lower() != "pending":
             continue
@@ -430,7 +430,7 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username=None):
             data_service.clear_test_run_data()
             return 0
     rtype = (cp.get("type") or "").strip().lower()
-    if rtype not in ("test", "validation"):
+    if rtype not in ("test", "validation", "calibration"):
         data_service.clear_test_run_data()
         return 0
     td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
@@ -578,8 +578,11 @@ def _approval_verifier_eligible_for_recipe_disable(verifier: dict) -> bool:
 
 def _report_approval_internal_key(report_type: str) -> str:
     """Internal RBAC key for approving a report by type."""
-    if str(report_type or "").strip().lower() == "validation":
+    rtype = str(report_type or "").strip().lower()
+    if rtype == "validation":
         return "validation-report-approve"
+    if rtype == "calibration":
+        return "calibration-report-approve"
     return "test-report-approve"
 
 
@@ -609,6 +612,15 @@ def _approval_verifier_eligible_for_report(verifier: dict, report_type: str = No
     if role == "factory":
         return True
     return rbac_service.member_has_internal(vm, _report_approval_internal_key(report_type))
+
+
+def _approval_verifier_eligible_for_calibration_start(verifier: dict) -> bool:
+    """Pre-calibration authorization: verifier must hold calibration report approval."""
+    vm = _approval_verifier_member(verifier)
+    role = str(vm.get("role") or "").strip().lower()
+    if role == "factory":
+        return True
+    return rbac_service.member_has_internal(vm, "calibration-report-approve")
 
 
 def _approval_verifier_eligible_for_export(verifier: dict) -> bool:
@@ -688,7 +700,7 @@ def _stamp_report_operator(enriched):
 
 def _report_requires_approval(report):
     rtype = (report.get("type") or "").strip().lower()
-    return rtype in ("test", "validation")
+    return rtype in ("test", "validation", "calibration")
 
 
 def _check_report_approved_for_print_export(report=None, report_id=None, report_data=None):
@@ -729,7 +741,9 @@ PERMISSION_CARD_LABELS = {
     "perm_recipe_approve": "Recipe approval",
     "perm_profile_admin": "Profile management",
     "perm_validation_test": "Validation test access",
+    "perm_calibration_test": "Calibration test access",
     "perm_validation_report_approve": "Validation report approval",
+    "perm_calibration_report_approve": "Calibration report approval",
     "perm_datetime": "Edit date and time",
     "perm_reports_view": "View and print reports",
     "perm_audit_view": "View audit trails only",
@@ -1163,7 +1177,12 @@ def _consume_approval_verify_token(expected_purpose):
         if not _verifier_payload_has_internal(payload, perm_key):
             if perm_key == "validation-report-approve":
                 return None, "Verifier does not have validation report approval permission."
+            if perm_key == "calibration-report-approve":
+                return None, "Verifier does not have calibration report approval permission."
             return None, "Verifier does not have test report approval permission."
+    elif exp == "calibration":
+        if not _verifier_payload_has_internal(payload, "calibration-report-approve"):
+            return None, "Verifier does not have calibration report approval permission."
     elif exp == "recipe":
         if not _verifier_payload_has_internal(payload, "recipe-approve"):
             return None, "Verifier does not have recipe approval permission."
@@ -1629,6 +1648,11 @@ def create_report():
                 ["quick-test", "recipe-test"],
                 "Forbidden. You do not have permission to save test reports.",
             )
+        elif rtype == "calibration":
+            gate = _require_session_internal(
+                "calibration-menu",
+                "Forbidden. You do not have permission to save calibration reports.",
+            )
         else:
             gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to save reports.")
         if gate:
@@ -1639,7 +1663,7 @@ def create_report():
             recipe=recipe,
             factory_settings=report_data.get("factorySettings"),
         )
-        if (enriched.get("type") or "").strip().lower() in ("test", "validation"):
+        if (enriched.get("type") or "").strip().lower() in ("test", "validation", "calibration"):
             enriched = _stamp_report_operator(enriched)
             # Aborted test/validation reports also require approval.
             enriched["reportApprovalStatus"] = "pending"
@@ -1806,11 +1830,16 @@ def abort_report(report_id):
                 ["quick-test", "recipe-test"],
                 "Forbidden. You do not have permission to abort test reports.",
             )
+        elif rtype == "calibration":
+            gate = _require_session_internal(
+                "calibration-menu",
+                "Forbidden. You do not have permission to abort calibration reports.",
+            )
         else:
             gate = _require_session_internal("reports-view", "Forbidden.")
         if gate:
             return gate
-        if rtype not in ("test", "validation"):
+        if rtype not in ("test", "validation", "calibration"):
             return jsonify({"ok": False, "error": "Report type cannot be aborted"}), 400
         st = (report.get("reportApprovalStatus") or "").strip().lower()
         if st != "pending":
@@ -2683,8 +2712,8 @@ def approval_verify():
         payload = request.get_json(force=True, silent=True) or {}
         method = str(payload.get("method") or "credentials").strip().lower()
         purpose = str(payload.get("purpose") or "recipe").strip().lower()
-        if purpose not in ("recipe", "report", "user_admin", "export", "recipe_disable"):
-            return jsonify({"ok": False, "error": "purpose must be recipe, report, user_admin, export, or recipe_disable"}), 400
+        if purpose not in ("recipe", "report", "user_admin", "export", "recipe_disable", "calibration"):
+            return jsonify({"ok": False, "error": "purpose must be recipe, report, user_admin, export, recipe_disable, or calibration"}), 400
         verifier = None
         username = (payload.get("username") or "").strip()
 
@@ -2772,6 +2801,8 @@ def approval_verify():
             eligible = _approval_verifier_eligible_for_recipe_disable(verifier)
         elif purpose == "export":
             eligible = _approval_verifier_eligible_for_export(verifier)
+        elif purpose == "calibration":
+            eligible = _approval_verifier_eligible_for_calibration_start(verifier)
         else:
             eligible = _approval_verifier_eligible_for_user_admin(verifier)
         if not eligible:
@@ -3828,10 +3859,11 @@ def export_reports():
 
     Body:
       report_ids:        [int, ...]                       (required)
+      pdf_html_by_id:    { "<id>": "<html>", ... }        (required; client preview HTML)
       device_path:       "/dev/sdb1"                      (optional; required if multiple pendrives)
       export_path:       "/abs/path"                      (optional; override mount detection for dev)
 
-    PDFs are generated server-side from the A4 plain-text layout (same as dot-matrix print).
+    PDFs are rendered from client-supplied preview HTML (TapDensity export architecture).
 
     Returns 409 with `devices` list when multiple pendrives are connected and none chosen.
     """
@@ -3854,29 +3886,26 @@ def export_reports():
         device_path = (data.get("device_path") or "").strip() or None
         requested_export_path = (data.get("export_path") or "").strip() or None
 
-        # Regenerate PDFs from A4 plain-text layout (same as dot-matrix print).
-        generated = []
-        missing = []
+        pdf_html_by_id = data.get("pdf_html_by_id") or {}
+        if isinstance(pdf_html_by_id, dict):
+            pdf_html_by_id = {str(k): v for k, v in pdf_html_by_id.items()}
+        else:
+            pdf_html_by_id = {}
         for rid in report_ids:
-            report = data_service.get_report(rid) or {}
-            if _report_requires_approval(report):
-                st = str(report.get("reportApprovalStatus") or "").strip().lower()
-                if st == "pending":
-                    missing.append(rid)
-                    continue
-            if _generate_report_pdf_file(rid):
-                generated.append(rid)
-            else:
-                missing.append(rid)
-        if missing:
-            return jsonify({
-                "success": False,
-                "error": (
-                    "PDF unavailable for report(s): {}. Approve the report first, "
-                    "or ensure aborted reports were saved correctly."
-                ).format(", ".join(str(i) for i in missing)),
-                "missing_pdfs": missing,
-            }), 400
+            html = pdf_html_by_id.get(str(rid))
+            if not html or not str(html).strip():
+                return jsonify({
+                    "success": False,
+                    "error": (
+                        "Missing pdf_html_by_id for report {}. "
+                        "Open preview from the app or ensure the UI sends HTML."
+                    ).format(rid),
+                }), 400
+
+        for rid in report_ids:
+            blocked = _check_report_approved_for_print_export(report_id=rid)
+            if blocked is not None:
+                return blocked
 
         export_dir, err, devices, mounted_now = _resolve_export_destination(device_path, requested_export_path)
         if err == "MULTIPLE_PENDRIVES":
@@ -3884,45 +3913,14 @@ def export_reports():
         if err:
             return jsonify({"success": False, "error": err, "devices": devices}), 400
 
-        for rid in report_ids:
-            blocked = _check_report_approved_for_print_export(report_id=rid)
-            if blocked is not None:
-                return blocked
-
         export_dir.mkdir(parents=True, exist_ok=True)
+        result = report_service.export_reports_to_usb(
+            report_ids, str(export_dir), pdf_html_by_id=pdf_html_by_id
+        )
+        if not result.get("success"):
+            return jsonify(result), 400
 
-        exported_files = []
-        failed = []
-        for rid in report_ids:
-            src = _report_pdf_path(rid)
-            if not src.exists():
-                failed.append({"id": rid, "error": "PDF missing"})
-                continue
-            report = data_service.get_report(rid) or {}
-            recipe = report.get("recipe") if isinstance(report.get("recipe"), dict) else {}
-            product = (recipe.get("productName") or report.get("name") or "report")
-            safe_name = "".join(c for c in str(product) if c.isalnum() or c in "-_") or "report"
-            ts_raw = str(report.get("createdAt") or "")
-            safe_ts = "".join(c for c in ts_raw if c.isalnum() or c in "-_.T") or "ts"
-            dest = export_dir / "{}_{}_{}.pdf".format(safe_name, rid, safe_ts)
-            try:
-                with open(src, "rb") as fin, open(dest, "wb") as fout:
-                    while True:
-                        chunk = fin.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        fout.write(chunk)
-                exported_files.append(str(dest))
-            except Exception as e:
-                failed.append({"id": rid, "error": str(e)})
-
-        # Best-effort sync + unmount (only if we mounted it here).
-        # Default is power_off=False so repeat exports don't require re-plugging.
-        unmount_detail = None
-        if mounted_now and not requested_export_path:
-            power_off = bool(data.get("power_off") or False)
-            unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
-
+        exported_files = result.get("exported_files") or []
         ok_count = len(exported_files)
         _audit(
             None, None,
@@ -3931,15 +3929,20 @@ def export_reports():
                 ok_count, "" if ok_count == 1 else "s"
             ),
         )
-        if batch_id and exported_files and not failed:
+        if batch_id and exported_files:
             data_service.confirm_report_export_batch(batch_id)
+
+        unmount_detail = None
+        if mounted_now and not requested_export_path:
+            power_off = bool(data.get("power_off") or False)
+            unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
+
         return jsonify({
-            "success": (len(failed) == 0),
-            "count": len(exported_files),
+            "success": True,
+            "count": ok_count,
             "exported_files": exported_files,
-            "failed": failed,
+            "failed": [],
             "export_directory": str(export_dir),
-            "generated_pdfs_now": generated,
             "unmount_detail": unmount_detail,
             "device_path": device_path or (devices[0]["path"] if len(devices) == 1 else None),
             "batchId": batch_id or None,
@@ -4359,11 +4362,24 @@ def calibrate_tare():
     return jsonify(result)
 
 
+def _require_calibration_start_approval():
+    """Non-factory users must present a calibration authorization token before hardware calibrate."""
+    if _effective_request_role() == "factory":
+        return None
+    _verified, verify_err = _consume_approval_verify_token("calibration")
+    if verify_err:
+        return jsonify({"ok": False, "error": verify_err}), 401
+    return None
+
+
 @app.route("/api/hardware/calibrate/load", methods=["POST"])
 def calibrate_load():
     gate = _require_session_internal("calibration-menu", "Forbidden. You do not have permission to calibrate.")
     if gate:
         return gate
+    auth_gate = _require_calibration_start_approval()
+    if auth_gate:
+        return auth_gate
     result = hardware_service.send_command("C,LOAD*")
     return jsonify(result)
 
@@ -4390,6 +4406,9 @@ def calibrate_distance_span():
     gate = _require_session_internal("calibration-menu", "Forbidden. You do not have permission to calibrate.")
     if gate:
         return gate
+    auth_gate = _require_calibration_start_approval()
+    if auth_gate:
+        return auth_gate
     result = hardware_service.send_command("C,DS*", timeout=None)
     if result.get("ok"):
         resp = (result.get("response") or "").upper()

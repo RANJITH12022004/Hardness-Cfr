@@ -260,6 +260,11 @@ function expandAllowListToInternalKeys(allowList) {
   (allowList || []).forEach(function (k) {
     var key = String(k || '').trim();
     if (!key) return;
+    if (key === 'validate-menu') {
+      if (internal.indexOf('validation-test') === -1) internal.push('validation-test');
+      if (internal.indexOf('calibration-menu') === -1) internal.push('calibration-menu');
+      return;
+    }
     var exp = PERM_CARD_EXPAND[key];
     if (exp) {
       exp.forEach(function (ik) {
@@ -342,6 +347,11 @@ function canAccess(roleOrUser, featureKey) {
   return restriction !== 'no-access';
 }
 
+/** Validate hub: allow if user may run validation and/or calibration. */
+function canAccessValidationOrCalibration(roleOrUser) {
+  return canAccess(roleOrUser, 'validation-test') || canAccess(roleOrUser, 'calibration-menu');
+}
+
 function isViewOnly(roleOrUser, featureKey) {
   return getEffectiveRestriction(roleOrUser, featureKey) === 'view-only';
 }
@@ -370,6 +380,9 @@ function checkNavigationAccess(screenId) {
   if (screenId === 'manage-recipes') {
     var mode = (typeof window !== 'undefined' && window.recipeListMode) ? window.recipeListMode : 'manage';
     featureKey = mode === 'load' ? 'recipe-test' : 'recipe-manage';
+  }
+  if (screenId === 'validate') {
+    return canAccessValidationOrCalibration(userObj || role);
   }
   return canAccess(userObj || role, featureKey);
 }

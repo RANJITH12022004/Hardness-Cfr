@@ -678,16 +678,22 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
     }
     if report.get("type") == "validation":
         preview["validationSubtype"] = report.get("validationSubtype")
-        preview["usp"] = report.get("usp")
-        preview["tapsMin"] = report.get("tapsMin")
-        preview["dropHeight"] = report.get("dropHeight")
-        preview["expectedTapCount"] = report.get("expectedTapCount")
-        preview["actualTapCount"] = report.get("actualTapCount")
-        runs = report.get("validationRuns")
-        if not runs and isinstance(td, dict):
-            runs = td.get("validationRuns")
-        if runs:
-            preview["validationRuns"] = runs
+        for key in (
+            "expectedWeight",
+            "min",
+            "max",
+            "mean",
+            "expectedGaugeBlock",
+            "distance",
+            "difference",
+            "status",
+        ):
+            if report.get(key) is not None:
+                preview[key] = report.get(key)
+    elif report.get("type") == "calibration":
+        preview["calibrationSubtype"] = report.get("calibrationSubtype")
+        if report.get("status") is not None:
+            preview["status"] = report.get("status")
     # Same monospace A4 text used by A4 print and PDF export (screen preview must match).
     try:
         import print_service
@@ -756,74 +762,52 @@ def _statistics_table_html(preview: Dict[str, Any], td: Dict[str, Any]) -> str:
 
 def _validation_details_table_html(preview: Dict[str, Any]) -> str:
     td = preview.get("testData") if isinstance(preview.get("testData"), dict) else preview
-    runs = preview.get("validationRuns")
-    if not runs and isinstance(td, dict):
-        runs = td.get("validationRuns")
+    report_type = str(preview.get("type") or "validation").strip().lower()
     rows = []
-    if isinstance(runs, list) and runs:
-        for run in runs:
-            if not isinstance(run, dict):
-                continue
-            usp = run.get("usp") or ("USP 2" if run.get("validationSubtype") == "load" else "USP 1")
-            date_str = _format_report_ts(run.get("completedAt") or preview.get("completedAt") or preview.get("createdAt"))
-            taps_min = run.get("tapsMin", "--")
-            drop_h = run.get("dropHeight", "--")
-            expected = run.get("expectedTapCount", "--")
-            tol = run.get("expectedTolerance")
-            expected_disp = (
-                "{} (+/- {})".format(expected, tol)
-                if tol is not None and expected not in (None, "", "--")
-                else expected
+    date_str = _format_report_ts(
+        (td.get("completedAt") if isinstance(td, dict) else None)
+        or preview.get("completedAt")
+        or preview.get("createdAt")
+    )
+    rows.append('<tr><th>Date / Time</th><td colspan="3">{}</td></tr>'.format(_html_esc(date_str)))
+    if report_type == "calibration":
+        status = preview.get("status") or (td.get("status") if isinstance(td, dict) else None) or "Calibrated"
+        subtype = preview.get("calibrationSubtype") or "load"
+        rows.append(
+            '<tr><th>Calibration Type</th><td>{}</td><th>Status</th><td>{}</td></tr>'.format(
+                _html_esc(subtype), _html_esc(status)
             )
-            actual = run.get("actualTapCount", "--")
-            status = run.get("status", "--")
-            rows.append('<tr><th colspan="4" class="usp-hdr">{} validation</th></tr>'.format(_html_esc(usp)))
-            rows.append('<tr><th>Date / Time</th><td colspan="3">{}</td></tr>'.format(_html_esc(date_str)))
+        )
+    else:
+        subtype = preview.get("validationSubtype") or (td.get("validationSubtype") if isinstance(td, dict) else None) or "load"
+        status = preview.get("status") or (td.get("status") if isinstance(td, dict) else None) or "--"
+        if subtype == "load":
             rows.append(
-                "<tr><th>USP</th><td>{}</td><th>Taps/Min</th><td>{}</td></tr>".format(
-                    _html_esc(usp), _html_esc(taps_min)
+                "<tr><th>Expected Weight (g)</th><td>{}</td><th>Min (g)</th><td>{}</td></tr>".format(
+                    _html_esc(preview.get("expectedWeight", "--")),
+                    _html_esc(preview.get("min", "--")),
                 )
             )
             rows.append(
-                "<tr><th>Drop Height (mm)</th><td>{}</td><th>Status</th><td>{}</td></tr>".format(
-                    _html_esc(drop_h), _html_esc(status)
+                "<tr><th>Max (g)</th><td>{}</td><th>Mean (g)</th><td>{}</td></tr>".format(
+                    _html_esc(preview.get("max", "--")),
+                    _html_esc(preview.get("mean", "--")),
+                )
+            )
+            rows.append('<tr><th>Status</th><td colspan="3">{}</td></tr>'.format(_html_esc(status)))
+        else:
+            rows.append(
+                "<tr><th>Gauge Value (mm)</th><td>{}</td><th>Measured (mm)</th><td>{}</td></tr>".format(
+                    _html_esc(preview.get("expectedGaugeBlock", "--")),
+                    _html_esc(preview.get("distance", "--")),
                 )
             )
             rows.append(
-                "<tr><th>Expected Tap Count</th><td>{}</td><th>Actual Tap Count</th><td>{}</td></tr>".format(
-                    _html_esc(expected_disp), _html_esc(actual)
+                "<tr><th>Difference (mm)</th><td>{}</td><th>Status</th><td>{}</td></tr>".format(
+                    _html_esc(preview.get("difference", "--")),
+                    _html_esc(status),
                 )
             )
-    elif isinstance(td, dict):
-        date_str = _format_report_ts(td.get("completedAt") or preview.get("completedAt") or preview.get("createdAt"))
-        usp = td.get("usp") or preview.get("usp") or "--"
-        taps_min = td.get("tapsMin", preview.get("tapsMin", "--"))
-        drop_h = td.get("dropHeight", preview.get("dropHeight", "--"))
-        expected = td.get("expectedTapCount", preview.get("expectedTapCount", "--"))
-        tol = td.get("expectedTolerance", preview.get("expectedTolerance"))
-        expected_disp = (
-            "{} (+/- {})".format(expected, tol)
-            if tol is not None and expected not in (None, "", "--")
-            else expected
-        )
-        actual = td.get("actualTapCount", preview.get("actualTapCount", "--"))
-        status = td.get("status") or preview.get("status") or "--"
-        rows.append('<tr><th>Date / Time</th><td colspan="3">{}</td></tr>'.format(_html_esc(date_str)))
-        rows.append(
-            "<tr><th>USP</th><td>{}</td><th>Taps/Min</th><td>{}</td></tr>".format(
-                _html_esc(usp), _html_esc(taps_min)
-            )
-        )
-        rows.append(
-            "<tr><th>Drop Height (mm)</th><td>{}</td><th>Status</th><td>{}</td></tr>".format(
-                _html_esc(drop_h), _html_esc(status)
-            )
-        )
-        rows.append(
-            "<tr><th>Expected Tap Count</th><td>{}</td><th>Actual Tap Count</th><td>{}</td></tr>".format(
-                _html_esc(expected_disp), _html_esc(actual)
-            )
-        )
     return "".join(rows) if rows else '<tr><td colspan="4">No validation data</td></tr>'
 
 
@@ -881,17 +865,16 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
     escaped = html_module.escape(a4_text)
 
     css = (
-        "@page{size:A4 portrait;margin:10mm;}"
-        "body{margin:0;padding:3mm 0;color:#000;background:#fff;"
-        "font-family:'Courier New',Courier,monospace;font-size:11pt;line-height:1.25;"
-        "text-align:center;box-sizing:border-box;"
-        "-webkit-print-color-adjust:exact;print-color-adjust:exact;}"
-        ".a4-sheet{display:inline-block;width:190mm;max-width:190mm;text-align:left;vertical-align:top;}"
-        "pre{margin:0;white-space:pre-wrap;tab-size:4;letter-spacing:0;font-size:inherit;line-height:inherit;}"
+        "@page{size:A4 portrait;margin:5mm;}"
+        "html,body{margin:0;padding:0;width:100%;height:100%;color:#000;background:#fff;"
+        "font-family:'Courier New',Courier,monospace;font-size:9pt;line-height:1.12;"
+        "box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;}"
+        "pre{margin:0;padding:0;width:100%;white-space:pre;tab-size:4;letter-spacing:0;"
+        "font-size:inherit;line-height:inherit;overflow:visible;}"
     )
     return (
         '<!doctype html><html><head><meta charset="utf-8"><title>Report</title>'
-        '<style>{}</style></head><body><div class="a4-sheet"><pre>{}</pre></div></body></html>'
+        '<style>{}</style></head><body><pre>{}</pre></body></html>'
     ).format(css, escaped)
 
 
@@ -909,23 +892,48 @@ def create_pdf_report(report_data: Dict[str, Any], template_type: str = "standar
         return None
 
 
-def export_reports_to_usb(report_ids: List[int], export_path: str) -> Dict[str, Any]:
+def export_reports_to_usb(
+    report_ids: List[int],
+    export_path: str,
+    pdf_html_by_id: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Export reports to USB as PDF files rendered from client preview HTML."""
     try:
         export_dir = pathlib.Path(export_path)
-        export_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            export_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            err = e.errno
+            if err in (5, 19):
+                return {
+                    "success": False,
+                    "error": (
+                        "USB export path is not reachable (device removed or I/O error). "
+                        "Reinsert the pendrive and try again."
+                    ),
+                }
+            raise
+        mapping = pdf_html_by_id or {}
         exported_files = []
         for report_id in report_ids:
             report = data_service.get_report(report_id)
             if not report:
                 continue
+            html = mapping.get(str(report_id))
+            if not html or not str(html).strip():
+                return {
+                    "success": False,
+                    "error": f"Missing pdf_html_by_id for report {report_id}",
+                }
             timestamp = report.get("createdAt", datetime.now().strftime("%Y-%m-%dT%H:%M:%S"))
             safe_ts = "".join(c for c in str(timestamp) if c.isalnum() or c in "-_.T")
-            recipe_name = report.get("recipe", {}).get("productName", "report")
-            safe_name = "".join(c for c in recipe_name if c.isalnum() or c in "-_")
-            filename = f"{safe_name}_{report_id}_{safe_ts}.json"
+            recipe_name = report.get("recipe", {}).get("productName") or report.get("name") or "report"
+            safe_name = "".join(c for c in recipe_name if c.isalnum() or c in "-_") or "report"
+            filename = f"{safe_name}_{report_id}_{safe_ts}.pdf"
             export_file = export_dir / filename
-            with open(export_file, "w", encoding="utf-8") as f:
-                json.dump(report, f, indent=2, ensure_ascii=False)
+            import print_formats
+
+            print_formats.render_html_to_a4_pdf(html, export_file)
             exported_files.append(str(export_file))
         return {"success": True, "exported_files": exported_files, "count": len(exported_files)}
     except Exception as e:

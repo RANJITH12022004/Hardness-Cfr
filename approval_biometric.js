@@ -575,6 +575,7 @@ function clearReportApprovalGate() {
     window._reportApprovalGate = null;
     stopReportApprovalPoll();
     if (typeof clearHardnessTestRunCheckpoint === 'function') clearHardnessTestRunCheckpoint();
+    if (typeof clearSidebarInteractionLock === 'function') clearSidebarInteractionLock();
 }
 
 function setReportApprovalGateFromPreview(preview, reportId) {
@@ -892,6 +893,12 @@ function finishTestRunReportSaved(reportId) {
     if (typeof resetQuickTestFormAfterRunIfPending === 'function') {
         resetQuickTestFormAfterRunIfPending();
     }
+    if (typeof unlockNavigation === 'function') {
+        unlockNavigation();
+    }
+    if (typeof clearSidebarInteractionLock === 'function') {
+        clearSidebarInteractionLock();
+    }
     if (reportId) {
         if (typeof openReportPreview === 'function') {
             openReportPreview(reportId, { setGate: true });
@@ -925,6 +932,18 @@ function _approvalVerifyModalOptionsForReport() {
         usernameLabelText: 'Username',
         usernamePlaceholder: 'Approver username',
         emptyCredentialsMessage: 'Enter username and password.'
+    };
+}
+
+/** Pre-calibration authorization: verifier must have calibration-report-approve permission card. */
+function _approvalVerifyModalOptionsForCalibrationStart() {
+    return {
+        purpose: 'calibration',
+        titleText: 'Calibration authorization required',
+        subtitleText: 'Enter credentials for a user with Calibration report approval permission.',
+        usernameLabelText: 'Verifier username',
+        usernamePlaceholder: 'Verifier username',
+        emptyCredentialsMessage: 'Enter verifier username and password.'
     };
 }
 

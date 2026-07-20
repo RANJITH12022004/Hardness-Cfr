@@ -32,8 +32,7 @@
     <link rel="stylesheet" href="base.css">
     <link rel="stylesheet" href="layout.css">
     <link rel="stylesheet" href="components.css">
-    <link rel="stylesheet" href="styles.css">
-    <script src="./libs/tailwind.min.js"></script>
+    <link rel="stylesheet" href="styles.css?v=20260720l">
 </head>
 
 <body>
@@ -505,7 +504,7 @@
                                         </label>
                                         <div class="param-samples-row">
                                             <label class="param-samples-label">Samples:</label>
-                                            <input type="number" id="param-samples-diameter" class="input-field param-samples param-samples-clickable" value="" min="1" max="100" readonly placeholder="Enter" onclick="openParamConfigModal('Diameter')">
+                                            <input type="number" id="param-samples-diameter" class="input-field param-samples param-samples-clickable" value="" min="1" max="100" readonly placeholder="Enter" onclick="openParamConfigModal((document.getElementById('param-diameter-label-span')||{}).textContent||'Diameter')">
                                         </div>
                                         <span class="param-error" id="diameter-error" style="display:none;"></span>
                                     </div>
@@ -1087,9 +1086,13 @@
 
                 <!-- Report Preview Page -->
                 <div class="page" id="page-report-preview">
-                    <div class="reports-container" style="overflow-y: auto;">
+                    <div class="reports-container">
                         <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> Complete Pass/Fail and sign on this screen before leaving. Power loss will save the report as Aborted (power interruption).</div>
                         <div class="report-preview-container report-print-template" id="report-content">
+                            <div id="report-a4-text-view" class="report-a4-text-view" style="display: none;">
+                                <pre id="report-a4-text" class="report-a4-text-preview"></pre>
+                            </div>
+                            <div id="report-html-view">
                             <h1>RAISE LAB EQUIPMENT</h1>
                             <h2>TABLET HARDNESS TESTER</h2>
                             <h2 id="report-company-name">COMPANY NAME</h2>
@@ -1208,16 +1211,10 @@
                                 <tbody id="report-statistics-body">
                                 </tbody>
                             </table>
-
-                            <!-- Remarks (test reports only; hidden with report-test-sections) -->
-                            <h3 id="report-remarks-heading">REMARKS</h3>
-                            <div class="report-remarks-box" id="report-remarks-box"></div>
                             </div>
 
-                        </div>
-
-                        <!-- Sign-off & approval (always visible; outside print template and test-only sections) -->
-                        <div id="report-signoff-section" class="report-signoff-section">
+                            <h3 id="report-remarks-heading">REMARKS</h3>
+                            <div class="report-remarks-box" id="report-remarks-box"></div>
                             <table class="report-approval-table">
                                 <tr>
                                     <th>Operated By</th>
@@ -1236,6 +1233,7 @@
                                     <td id="report-approval-remarks" colspan="3"></td>
                                 </tr>
                             </table>
+                            </div>
                             <div id="report-approve-panel" class="report-approve-panel" style="display: none;">
                                 <h3 id="report-approve-panel-title">Test report approval</h3>
                                 <p id="report-approve-operator-hint" class="report-approve-operator-hint" style="display: none;">You cannot approve your own report. Ask a Reviewer or Admin to sign below.</p>
@@ -1384,18 +1382,6 @@
                                 </svg>
                             </div>
                             <h3>Factory Settings</h3>
-                        </button>
-
-                        <!-- Factory support -->
-                        <button type="button" class="settings-card settings-factory-support" onclick="goToPage('factory-support')">
-                            <div class="settings-icon">
-                                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M3 18v-6a9 9 0 0 1 18 0v6"></path>
-                                    <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"></path>
-                                </svg>
-                            </div>
-                            <h3>Factory support</h3>
                         </button>
 
                         <!-- Factory Reset -->
@@ -1622,57 +1608,6 @@
                                     Save
                                 </button>
                             </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Factory support -->
-                <div class="page" id="page-factory-support">
-                    <div class="page-content">
-                        <div class="form-container">
-                            <h2 class="section-title">Factory support</h2>
-                            <p class="factory-support-login-instructions">
-                                Connect this device to the LAN, then sign in using the factory support credentials.
-                            </p>
-
-                            <p id="factory-support-loading-msg" class="factory-support-loading-msg" style="display: none;" aria-live="polite">
-                                Please wait while this device prepares network information…
-                            </p>
-
-                            <div class="form-grid factory-support-form-grid">
-                                <div class="form-group">
-                                    <label>ID</label>
-                                    <input type="text" id="factory-support-user" class="input-field" autocomplete="username"
-                                        placeholder="ID"
-                                        onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                                </div>
-                                <div class="form-group">
-                                    <label>Password</label>
-                                    <input type="password" id="factory-support-password" class="input-field" autocomplete="current-password"
-                                        placeholder="Password"
-                                        onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                                </div>
-                            </div>
-
-                            <div class="button-group" style="margin-top: 8px;">
-                                <button type="button" id="factory-support-btn-back" class="btn btn-secondary" onclick="goToPage('settings')">Back</button>
-                                <button type="button" id="factory-support-btn-submit" class="btn btn-success" onclick="submitFactorySupportLogin()">Sign in</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Factory support: IP result (after sign-in) -->
-                <div class="page" id="page-factory-support-result">
-                    <div class="page-content factory-support-result-page">
-                        <h2 class="section-title factory-support-result-title">Network address</h2>
-                        <p class="factory-support-result-instructions">
-                            Use this address on the same LAN to reach this device.
-                        </p>
-                        <div id="factory-support-result-ip" class="factory-support-ip-hero"></div>
-                        <div class="button-group" style="margin-top: 32px;">
-                            <button type="button" class="btn btn-secondary" onclick="goToPage('factory-support')">Back</button>
-                            <button type="button" class="btn btn-success" onclick="goToPage('settings')">Done</button>
                         </div>
                     </div>
                 </div>
@@ -2049,6 +1984,14 @@
                                 </div>
                             </div>
 
+                            <!-- Live sample results grid (updates during test run) -->
+                            <div class="run-live-data-panel test-grid-container white-theme-grid">
+                                <table class="test-results-table white-theme-table" id="test-run-results-table">
+                                    <thead id="test-run-results-head"></thead>
+                                    <tbody id="test-run-results-body"></tbody>
+                                </table>
+                            </div>
+
                             <!-- Summary strip (Total Samples + Unit) -->
                             <div class="run-summary-strip">
                                 <div class="summary-item card-samples">
@@ -2065,9 +2008,9 @@
                         </div>
                     </div>
                 </div>
-            </div>
+
 <!-- CFR from Friability shell: page-export -->
-    <div class="page" id="page-export">
+                <div class="page" id="page-export">
                     <div class="validation-main-container">
                         <p class="section-subtitle">Select what you want to export</p>
                         <div class="validation-settings-grid" style="max-width: 600px;">
@@ -2129,9 +2072,9 @@
                 </div>
 
 <!-- CFR from Friability shell: page-ip-configure -->
-    <div class="page" id="page-ip-configure">
+                <div class="page" id="page-ip-configure">
                     <div class="ip-configure-container">
-                        <p class="ip-configure-hint">WLAN and LAN IPv4 addresses (Tailscale addresses are hidden).</p>
+                        <p class="ip-configure-hint">WLAN and LAN IPv4 addresses.</p>
                         <div id="ip-configure-list" class="ip-configure-list" aria-live="polite">
                             <div class="ip-configure-loading">Loading addresses…</div>
                         </div>
@@ -2148,7 +2091,7 @@
                 </div>
 
 <!-- CFR from Friability shell: page-password-expired-reset -->
-    <div class="page" id="page-password-expired-reset">
+                <div class="page" id="page-password-expired-reset">
                     <div class="add-member-container">
                         <h2 class="section-title" id="password-reset-page-title">Reset Expired Password</h2>
                         <p class="section-subtitle" id="password-reset-page-subtitle">Your password has expired. Set a new password to continue.</p>
@@ -2182,6 +2125,7 @@
                     </div>
                 </div>
 
+            </div>
         </main>
     </div>
 
@@ -2408,11 +2352,11 @@
     <div id="keyboard-root"></div>
 
     
-    <script src="keyboard.js?v=20260624"></script>
-    <script src="rbac.js?v=20260624"></script>
-    <script src="validation.js?v=20260624c"></script>
-        <script src="approval_biometric.js?v=20260718a"></script>
-    <script src="script.js?v=20260720a"></script>
+    <script src="keyboard.js?v=20260720f"></script>
+    <script src="rbac.js?v=20260720n"></script>
+    <script src="validation.js?v=20260720n"></script>
+        <script src="approval_biometric.js?v=20260720n"></script>
+    <script src="script.js?v=20260720n"></script>
     <script src="profile_compliance.js?v=20260720a"></script>
 </body>
 

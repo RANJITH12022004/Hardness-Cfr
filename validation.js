@@ -175,8 +175,11 @@ function abortValidationCalibrationForHardwareError() {
 function refreshValidatePageAccess() {
     var validateBtn = document.querySelector('#page-validate .settings-validate');
     var calibrateBtn = document.querySelector('#page-validate .settings-calibrate');
-    if (validateBtn) validateBtn.style.display = '';
-    if (calibrateBtn) calibrateBtn.style.display = '';
+    var u = window.currentUser;
+    var canVal = u && typeof canAccess === 'function' && canAccess(u, 'validation-test');
+    var canCal = u && typeof _userCanRunCalibration === 'function' && _userCanRunCalibration();
+    if (validateBtn) validateBtn.style.display = canVal ? '' : 'none';
+    if (calibrateBtn) calibrateBtn.style.display = canCal ? '' : 'none';
 }
 
 function _userCanRunValidation() {
@@ -297,6 +300,11 @@ var PROCEDURE_DISTANCE_ZERO = [
 ];
 
 function startValidationFromType() {
+    if (!_userCanRunValidation()) {
+        if (typeof showAppModal === 'function') showAppModal('You do not have permission to run validation.', 'Permission');
+        else alert('You do not have permission to run validation.');
+        return;
+    }
     var selected = document.querySelector('input[name="val-type"]:checked');
     if (!selected) {
         alert('Please select a validation type.');
@@ -783,104 +791,126 @@ function startCalibrationFromType() {
 
 // ===== LOAD CALIBRATION =====
 
+function _requireCalibrationStartApproval() {
+    var role = (typeof getCurrentRole === 'function' ? getCurrentRole() : '') || '';
+    if (String(role).toLowerCase() === 'factory') {
+        return Promise.resolve('');
+    }
+    if (typeof openApprovalVerifyModal !== 'function') {
+        return Promise.reject(new Error('Calibration authorization UI is unavailable.'));
+    }
+    var opts = (typeof _approvalVerifyModalOptionsForCalibrationStart === 'function')
+        ? _approvalVerifyModalOptionsForCalibrationStart()
+        : { purpose: 'calibration', titleText: 'Calibration authorization required' };
+    return openApprovalVerifyModal(opts).then(function (token) {
+        if (!token) {
+            return Promise.reject(new Error('Calibration authorization was cancelled.'));
+        }
+        return String(token);
+    });
+}
+
 function startLoadCalibration() {
     var statusEl = document.getElementById('load-calibration-status');
     var btn = document.getElementById('load-calibration-start-btn');
     if (typeof window !== 'undefined') {
         window._userAbortedOperation = false;
     }
-    loadCalibrationRunning = true;
-    if (statusEl) statusEl.textContent = 'Calibrating...';
-    if (btn) btn.disabled = true;
-
-    fetch('/api/hardware/calibrate/load', { method: 'POST' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-            loadCalibrationRunning = false;
-            if (btn) btn.disabled = false;
-            var response = (data.response || '').toUpperCase();
-            if (response.indexOf('C,LOAD,OK') !== -1) {
-                if (statusEl) statusEl.textContent = 'Done';
-                var userInfo = getCurrentUserInfo();
-                var reportData = {
-                    name: 'Load Calibration - Calibrated',
-                    type: 'calibration',
-                    calibrationSubtype: 'load',
-                    createdAt: new Date().toISOString(),
-                    completedAt: new Date().toISOString(),
+    _requireCalibrationStartApproval().then(function (token) {
+        loadCalibrationRunning = true;
+        if (statusEl) statusEl.textContent = 'Calibrating...';
+        if (btn) btn.disabled = true;
+        var headers = { 'Content-Type': 'application/json' };
+        if (token) headers['X-Approval-Verify-Token'] = token;
+        return fetch('/api/hardware/calibrate/load', { method: 'POST', headers: headers });
+    }).then(function (r) {
+        if (!r || !r.json) return null;
+        return r.json();
+    }).then(function (data) {
+        if (!data) return;
+        loadCalibrationRunning = false;
+        if (btn) btn.disabled = false;
+        var response = (data.response || '').toUpperCase();
+        if (response.indexOf('C,LOAD,OK') !== -1) {
+            if (statusEl) statusEl.textContent = 'Done';
+            var userInfo = getCurrentUserInfo();
+            var reportData = {
+                name: 'Load Calibration - Calibrated',
+                type: 'calibration',
+                calibrationSubtype: 'load',
+                createdAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+                status: 'Calibrated',
+                testData: {
                     status: 'Calibrated',
-                    testData: {
-                        status: 'Calibrated',
-                        operatorName: userInfo.operatorName,
-                        employeeId: userInfo.employeeId
-                    }
-                };
-                fetch('/api/data/reports', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(reportData)
-                })
-                    .then(function (r) { return r.json(); })
-                    .then(function (createRes) {
-                        var reportId =
-                            createRes && createRes.id != null
-                                ? createRes.id
-                                : createRes && createRes.report && createRes.report.id != null
-                                  ? createRes.report.id
-                                  : null;
-                        showCalibrationDueModal(function () {
-                            console.log('[DEBUG] Load calibration callback executing, reportId:', reportId);
-                            // Clear all flags before navigation
-                            loadValidationRunning = false;
-                            distanceValidationRunning = false;
-                            loadCalibrationRunning = false;
-                            distanceCalibRunning = false;
-                            alert('Load calibration completed successfully.');
-                            if (window._userAbortedOperation) {
-                                console.log('[DEBUG] User aborted operation, skipping navigation');
-                                return;
-                            }
-                            if (reportId && typeof openReportPreview === 'function') {
-                                console.log('[DEBUG] Opening report preview for reportId:', reportId);
-                                openReportPreview(reportId, { setGate: true }).catch(function(e) {
-                                    console.error('[DEBUG] Failed to open report preview:', e);
-                                    if (typeof goToPage === 'function') {
-                                        console.log('[DEBUG] Fallback: navigating to reports page');
-                                        goToPage('reports');
-                                    }
-                                });
-                            } else if (typeof goToPage === 'function') {
-                                console.log('[DEBUG] No reportId or openReportPreview, navigating to reports page');
-                                goToPage('reports');
-                            } else {
-                                console.warn('[DEBUG] No navigation function available');
-                            }
-                        });
-                    })
-                    .catch(function (e) {
-                        showCalibrationDueModal(function () {
-                            // Clear all flags before navigation
-                            loadValidationRunning = false;
-                            distanceValidationRunning = false;
-                            loadCalibrationRunning = false;
-                            distanceCalibRunning = false;
-                            alert('Load calibration completed successfully. Report save failed: ' + e.message);
-                            if (typeof goToPage === 'function') goToPage('reports');
-                        });
+                    operatorName: userInfo.operatorName,
+                    employeeId: userInfo.employeeId
+                }
+            };
+            fetch('/api/data/reports', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(reportData)
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (createRes) {
+                    var reportId =
+                        createRes && createRes.id != null
+                            ? createRes.id
+                            : createRes && createRes.report && createRes.report.id != null
+                              ? createRes.report.id
+                              : null;
+                    showCalibrationDueModal(function () {
+                        console.log('[DEBUG] Load calibration callback executing, reportId:', reportId);
+                        loadValidationRunning = false;
+                        distanceValidationRunning = false;
+                        loadCalibrationRunning = false;
+                        distanceCalibRunning = false;
+                        alert('Load calibration completed successfully.');
+                        if (window._userAbortedOperation) {
+                            console.log('[DEBUG] User aborted operation, skipping navigation');
+                            return;
+                        }
+                        if (reportId && typeof openReportPreview === 'function') {
+                            console.log('[DEBUG] Opening report preview for reportId:', reportId);
+                            openReportPreview(reportId, { setGate: true }).catch(function(e) {
+                                console.error('[DEBUG] Failed to open report preview:', e);
+                                if (typeof goToPage === 'function') {
+                                    console.log('[DEBUG] Fallback: navigating to reports page');
+                                    goToPage('reports');
+                                }
+                            });
+                        } else if (typeof goToPage === 'function') {
+                            console.log('[DEBUG] No reportId or openReportPreview, navigating to reports page');
+                            goToPage('reports');
+                        } else {
+                            console.warn('[DEBUG] No navigation function available');
+                        }
                     });
-            } else if (response.indexOf('C,LOAD,ERR') !== -1 || response.indexOf('ERR') !== -1) {
-                if (statusEl) statusEl.textContent = 'Error';
-                alert('Load calibration failed.');
-            } else {
-                if (statusEl) statusEl.textContent = 'Ready';
-            }
-        })
-        .catch(function (e) {
-            loadCalibrationRunning = false;
-            if (btn) btn.disabled = false;
+                })
+                .catch(function (e) {
+                    showCalibrationDueModal(function () {
+                        loadValidationRunning = false;
+                        distanceValidationRunning = false;
+                        loadCalibrationRunning = false;
+                        distanceCalibRunning = false;
+                        alert('Load calibration completed successfully. Report save failed: ' + e.message);
+                        if (typeof goToPage === 'function') goToPage('reports');
+                    });
+                });
+        } else if (response.indexOf('C,LOAD,ERR') !== -1 || response.indexOf('ERR') !== -1) {
             if (statusEl) statusEl.textContent = 'Error';
-            alert('Calibration failed: ' + e.message);
-        });
+            alert('Load calibration failed.');
+        } else {
+            if (statusEl) statusEl.textContent = 'Ready';
+        }
+    }).catch(function (e) {
+        loadCalibrationRunning = false;
+        if (btn) btn.disabled = false;
+        if (statusEl) statusEl.textContent = 'Error';
+        if (e && e.message === 'Calibration authorization was cancelled.') return;
+        alert('Calibration failed: ' + (e.message || 'Unknown error'));
+    });
 }
 
 // ===== DISTANCE CALIBRATION (Distance Zero -> wait T,HOME,OK -> Calibrate -> C,DS,OK -> reports) =====
@@ -920,87 +950,90 @@ function startDistanceZeroCalibration() {
     }
 
     if (distanceCalibState === CALIB_READY) {
-        distanceCalibState = CALIB_EXECUTING;
-        if (btn) btn.disabled = true;
-        if (statusEl) statusEl.textContent = 'Calibrating...';
-
-        fetch('/api/hardware/calibrate/distance/span', { method: 'POST' })
-            .then(function (r) { return r.json(); })
-            .then(function (spanData) {
-                if (!spanData.ok) {
-                    throw new Error(spanData.error || 'Distance span failed');
-                }
-                distanceCalibState = CALIB_IDLE;
-                if (statusEl) statusEl.textContent = 'Done';
-                if (btn) { btn.textContent = 'Distance Zero'; btn.disabled = false; }
-                var userInfo = getCurrentUserInfo();
-                var reportData = {
-                    name: 'Distance Calibration - Calibrated',
-                    type: 'calibration',
-                    calibrationSubtype: 'distance-zero',
-                    createdAt: new Date().toISOString(),
-                    completedAt: new Date().toISOString(),
+        _requireCalibrationStartApproval().then(function (token) {
+            distanceCalibState = CALIB_EXECUTING;
+            if (btn) btn.disabled = true;
+            if (statusEl) statusEl.textContent = 'Calibrating...';
+            var headers = { 'Content-Type': 'application/json' };
+            if (token) headers['X-Approval-Verify-Token'] = token;
+            return fetch('/api/hardware/calibrate/distance/span', { method: 'POST', headers: headers });
+        }).then(function (r) {
+            if (!r || !r.json) return null;
+            return r.json();
+        }).then(function (spanData) {
+            if (!spanData) return;
+            if (!spanData.ok) {
+                throw new Error(spanData.error || 'Distance span failed');
+            }
+            distanceCalibState = CALIB_IDLE;
+            if (statusEl) statusEl.textContent = 'Done';
+            if (btn) { btn.textContent = 'Distance Zero'; btn.disabled = false; }
+            var userInfo = getCurrentUserInfo();
+            var reportData = {
+                name: 'Distance Calibration - Calibrated',
+                type: 'calibration',
+                calibrationSubtype: 'distance-zero',
+                createdAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+                status: 'Calibrated',
+                testData: {
                     status: 'Calibrated',
-                    testData: {
-                        status: 'Calibrated',
-                        operatorName: userInfo.operatorName,
-                        employeeId: userInfo.employeeId
-                    }
-                };
-                return fetch('/api/data/reports', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(reportData)
+                    operatorName: userInfo.operatorName,
+                    employeeId: userInfo.employeeId
+                }
+            };
+            return fetch('/api/data/reports', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(reportData)
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (createRes) {
+                    if (!createRes) return null;
+                    if (createRes.id != null) return createRes.id;
+                    if (createRes.report && createRes.report.id != null) return createRes.report.id;
+                    return null;
                 })
-                    .then(function (r) { return r.json(); })
-                    .then(function (createRes) {
-                        if (!createRes) return null;
-                        if (createRes.id != null) return createRes.id;
-                        if (createRes.report && createRes.report.id != null) return createRes.report.id;
-                        return null;
-                    })
-                    .catch(function () { return null; });
-            })
-            .then(function (reportId) {
-                showCalibrationDueModal(function () {
-                    console.log('[DEBUG] Distance calibration callback executing');
-                    // Clear all flags before navigation
-                    loadValidationRunning = false;
-                    distanceValidationRunning = false;
-                    loadCalibrationRunning = false;
-                    distanceCalibRunning = false;
-                    if (window._userAbortedOperation) {
-                        console.log('[DEBUG] User aborted operation, skipping navigation');
-                        return;
-                    }
-                    // Navigate directly to generated report preview after date selection
-                    if (reportId && typeof openReportPreview === 'function') {
-                        console.log('[DEBUG] Opening report preview for reportId:', reportId);
-                        openReportPreview(reportId, { setGate: true }).catch(function(e) {
-                            console.error('[DEBUG] Failed to open report preview:', e);
-                            if (typeof goToPage === 'function') {
-                                console.log('[DEBUG] Fallback: navigating to reports page');
-                                goToPage('reports');
-                            }
-                        });
-                    } else if (typeof goToPage === 'function') {
-                        console.log('[DEBUG] No reportId or openReportPreview, navigating to reports page');
-                        goToPage('reports');
-                    } else {
-                        console.warn('[DEBUG] No navigation function available');
-                    }
-                });
-            })
-            .catch(function (e) {
+                .catch(function () { return null; });
+        }).then(function (reportId) {
+            if (reportId === undefined) return;
+            showCalibrationDueModal(function () {
+                console.log('[DEBUG] Distance calibration callback executing');
+                loadValidationRunning = false;
+                distanceValidationRunning = false;
+                loadCalibrationRunning = false;
                 distanceCalibRunning = false;
-                distanceCalibState = CALIB_READY;
-                if (btn) { btn.disabled = false; btn.textContent = 'Calibrate'; }
-                if (statusEl) statusEl.textContent = 'Place 10 mm gauge block and press Calibrate';
-                if (e.message !== 'Cancelled') {
-                    if (typeof showModal === 'function') showModal('Calibration Failed', e.message || 'Unknown error');
-                    else alert('Calibration failed: ' + (e.message || 'Unknown error'));
+                if (window._userAbortedOperation) {
+                    console.log('[DEBUG] User aborted operation, skipping navigation');
+                    return;
+                }
+                if (reportId && typeof openReportPreview === 'function') {
+                    console.log('[DEBUG] Opening report preview for reportId:', reportId);
+                    openReportPreview(reportId, { setGate: true }).catch(function(e) {
+                        console.error('[DEBUG] Failed to open report preview:', e);
+                        if (typeof goToPage === 'function') {
+                            console.log('[DEBUG] Fallback: navigating to reports page');
+                            goToPage('reports');
+                        }
+                    });
+                } else if (typeof goToPage === 'function') {
+                    console.log('[DEBUG] No reportId or openReportPreview, navigating to reports page');
+                    goToPage('reports');
+                } else {
+                    console.warn('[DEBUG] No navigation function available');
                 }
             });
+        }).catch(function (e) {
+            distanceCalibRunning = false;
+            distanceCalibState = CALIB_READY;
+            if (btn) { btn.disabled = false; btn.textContent = 'Calibrate'; }
+            if (statusEl) statusEl.textContent = 'Place 10 mm gauge block and press Calibrate';
+            if (e && e.message === 'Calibration authorization was cancelled.') return;
+            if (e.message !== 'Cancelled') {
+                if (typeof showModal === 'function') showModal('Calibration Failed', e.message || 'Unknown error');
+                else alert('Calibration failed: ' + (e.message || 'Unknown error'));
+            }
+        });
     }
 }
 
