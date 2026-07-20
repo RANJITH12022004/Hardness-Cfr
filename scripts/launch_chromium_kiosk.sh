@@ -39,6 +39,16 @@ if pgrep -f -- "$CHROME_BIN.*--app=${KIOSK_URL%/}" >/dev/null 2>&1; then
   exit 0
 fi
 
+# kiosk-display.service runs X11 via startx — not Wayland. Chromium 144+ defaults to
+# Wayland/ozone and exits immediately if no Wayland compositor is present (blank screen
+# after power-on). Force X11 unless an operator explicitly overrides CHROMIUM_OZONE_PLATFORM.
+export DISPLAY="${DISPLAY:-:0}"
+if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -d "${XDG_RUNTIME_DIR}" ]]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  mkdir -p "${XDG_RUNTIME_DIR}" 2>/dev/null || true
+fi
+OZONE_PLATFORM="${CHROMIUM_OZONE_PLATFORM:-x11}"
+
 exec "$CHROME_BIN" \
   --start-fullscreen \
   --noerrdialogs \
@@ -50,6 +60,7 @@ exec "$CHROME_BIN" \
   --incognito \
   --disable-session-crashed-bubble \
   --disable-features=TranslateUI \
-  --ozone-platform="${CHROMIUM_OZONE_PLATFORM:-wayland}" \
+  --ozone-platform="${OZONE_PLATFORM}" \
+  --ozone-platform-hint=x11 \
   --window-size=1024,600 \
   --app="${KIOSK_URL%/}"
