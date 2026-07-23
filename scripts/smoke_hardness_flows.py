@@ -99,7 +99,6 @@ class Client:
             f"/api/data/reports/{report_id}/approve",
             {
                 "passFail": pass_fail,
-                "drumPassFail": {"drum1": pass_fail, "drum2": pass_fail},
                 "remarks": "Smoke test approval",
             },
             extra_headers={

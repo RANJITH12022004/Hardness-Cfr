@@ -138,14 +138,10 @@ class Client:
             raise RuntimeError(f"report HTTP {r.status_code}: {r.json()}")
         return r.json()
 
-    def validation_start(self, mode: str) -> _Resp:
-        return self._request("POST", "/api/hardware/validation/load/start", {"mode": mode})
+    def validation_load_start(self) -> _Resp:
+        return self._request("POST", "/api/hardware/validation/load/start", {})
 
-    def adapter_check(self) -> dict:
-        r = self._request("POST", "/api/hardware/adapter/check")
-        return r.json() if r.content else {}
-
-    def validation_stop(self) -> None:
+    def validation_load_stop(self) -> None:
         self._request("POST", "/api/hardware/validation/load/stop", {})
 
 
@@ -304,25 +300,21 @@ def verify_power_interruption(res: RunResult, since_ms: int) -> None:
 
 
 def verify_hardware_routes(c: Client, res: RunResult, since_ms: int) -> None:
+    """Exercise tablet-hardness load validation hardware routes (no TapDensity adapter modes)."""
     c.login(TEST_USER, TEST_PASS)
-    check = c.adapter_check()
-    res.ok(f"Adapter check API ok={check.get('ok')}")
-    for mode in ("usp1", "usp2"):
-        r = c.validation_start(mode)
-        if r.status_code == 400 and (r.json() or {}).get("error") == "adapter_mismatch":
-            action = "holder error" if mode == "usp1" else "check adaptor and holder"
-            res.ok(f"validation/load/start mode={mode} → adapter_mismatch (400)")
-        elif r.status_code == 200:
-            res.note_warn(f"validation/load/start mode={mode} succeeded (adapter matched hardware)")
-            c.validation_stop()
-        else:
-            res.note_warn(f"validation/load/start mode={mode} → HTTP {r.status_code}: {(r.json() or {}).get('error')}")
+    r = c.validation_load_start()
+    if r.status_code == 200:
+        res.ok("validation/load/start → 200")
+        c.validation_load_stop()
+        res.ok("validation/load/stop invoked")
+    else:
+        res.note_warn(f"validation/load/start → HTTP {r.status_code}: {(r.json() or {}).get('error')}")
     time.sleep(0.3)
     entries = actions_in(entries_since(c.audit_log(), since_ms, TEST_USER))
-    if "holder error" in entries or "check adaptor and holder" in entries:
-        res.ok("Server-side adapter/holder error action in audit log")
+    if "Validation started" in entries or "Validation finished" in entries:
+        res.ok("Validation lifecycle actions present in audit log (from UI or hardware)")
     else:
-        res.note_warn("No USP adapter error from hardware (adapter may match device)")
+        res.note_warn("No validation lifecycle audit rows this run (hardware route only)")
 
 
 def verify_report_audit(c: Client, res: RunResult, since_ms: int) -> None:

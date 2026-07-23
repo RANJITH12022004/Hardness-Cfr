@@ -1,10 +1,8 @@
 [Unit]
-Description=Tablet Hardness Tester kiosk display (X11 + Chromium on tty1)
+Description=Tap Density kiosk display (X11 + Chromium on tty1)
 After=kiosk-bridge.service local-fs.target
 Wants=kiosk-bridge.service
-# Own tty1 exclusively — do not let console getty or a desktop greeter reclaim the screen
-# when Chromium briefly exits.
-Conflicts=getty@tty1.service lightdm.service display-manager.service
+Conflicts=getty@tty1.service
 
 [Service]
 Type=simple
@@ -18,16 +16,11 @@ StandardInput=tty
 StandardOutput=journal
 StandardError=journal
 WorkingDirectory=/home/rle
-Environment=CHROMIUM_OZONE_PLATFORM=x11
-Environment=DISPLAY=:0
 
 ExecStartPre=/bin/bash /opt/kiosk/scripts/kiosk_harden_permissions.sh
 ExecStart=/bin/bash /opt/kiosk/scripts/run_kiosk_display.sh
 Restart=always
-RestartSec=2
-# Crash loops used to hit the default start limit (5/10s), after which getty took tty1
-# and the operator saw a normal machine login instead of the kiosk UI.
-StartLimitIntervalSec=0
+RestartSec=3
 TimeoutStopSec=10
 
 [Install]

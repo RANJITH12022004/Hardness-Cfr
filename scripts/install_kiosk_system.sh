@@ -73,16 +73,7 @@ if [ -f "$KIOSK_HOME/.config/labwc/rc.xml" ]; then
   sed -i 's/mapToOutput="HDMI-A-1"/mapToOutput="HDMI-A-2"/g' "$KIOSK_HOME/.config/labwc/rc.xml" || true
 fi
 
-echo "==> Locking boot to kiosk (no console/desktop login on the panel)"
-# Boot to multi-user so LightDM / labwc desktop never owns the screen.
-systemctl set-default multi-user.target
-# Disable Raspberry Pi desktop greeter if present.
-systemctl disable lightdm.service 2>/dev/null || true
-systemctl stop lightdm.service 2>/dev/null || true
-systemctl mask lightdm.service 2>/dev/null || true
-systemctl mask display-manager.service 2>/dev/null || true
-# tty1 belongs to kiosk-display only — mask console getty so a Chromium restart
-# never drops the operator onto a machine login prompt.
+echo "==> Disabling tty1 getty autologin (display service owns tty1)"
 GETTY_DROPIN="/etc/systemd/system/getty@tty1.service.d"
 mkdir -p "$GETTY_DROPIN"
 for conf in autologin.conf override.conf; do
@@ -90,8 +81,6 @@ for conf in autologin.conf override.conf; do
     mv "$GETTY_DROPIN/$conf" "$GETTY_DROPIN/${conf}.disabled"
   fi
 done
-systemctl stop getty@tty1.service 2>/dev/null || true
-systemctl mask getty@tty1.service 2>/dev/null || true
 
 echo "==> Enabling services"
 systemctl daemon-reload

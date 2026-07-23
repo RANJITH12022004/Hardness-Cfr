@@ -295,6 +295,17 @@ def enroll(template_id, capture_timeout_sec=10.0):
 
 
 def identify(timeout_sec=10.0):
+    # Dev/CI mock: skip UART and return a configured template id (default 1).
+    mock_raw = str(_config.get("BIOMETRIC_MOCK") or os.environ.get("BIOMETRIC_MOCK") or "").strip().lower()
+    if mock_raw in ("1", "true", "yes", "on"):
+        try:
+            tid = int(_config.get("BIOMETRIC_MOCK_TEMPLATE_ID") or os.environ.get("BIOMETRIC_MOCK_TEMPLATE_ID") or 1)
+        except (TypeError, ValueError):
+            tid = 1
+        if _logger:
+            _logger.info("[BIOMETRIC] MOCK identify -> templateId=%s", tid)
+        return {"ok": True, "templateId": tid, "confidence": 100, "mock": True}
+
     verify = verify_sensor()
     if not verify.get("ok"):
         return verify

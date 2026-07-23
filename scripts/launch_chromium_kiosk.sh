@@ -4,11 +4,19 @@ set -euo pipefail
 
 KIOSK_URL="${KIOSK_URL:-http://127.0.0.1:5000/}"
 KIOSK_URL="${KIOSK_URL%/}/"
-CHROME_BIN=""
-if command -v chromium >/dev/null 2>&1; then
-  CHROME_BIN="chromium"
+
+# Prefer the Chromium binary directly — NOT /usr/bin/chromium.
+# The Debian/RPi wrapper sources /etc/chromium.d/* which forces
+#   --enable-remote-extensions
+# and then SKIPS --disable-background-networking. Offline that makes Chromium
+# hammer Google GCM/MCS (net error -2/-105) and can surface top-of-window
+# component/extension failures. The kiosk must run fully offline.
+if [[ -x /usr/lib/chromium/chromium ]]; then
+  CHROME_BIN="/usr/lib/chromium/chromium"
+elif command -v chromium >/dev/null 2>&1; then
+  CHROME_BIN="$(command -v chromium)"
 elif command -v chromium-browser >/dev/null 2>&1; then
-  CHROME_BIN="chromium-browser"
+  CHROME_BIN="$(command -v chromium-browser)"
 else
   echo "chromium not found" >&2
   exit 1
@@ -35,7 +43,7 @@ for _ in $(seq 1 90); do
 done
 
 # Avoid opening a stack of kiosk windows if the desktop autostart runs twice.
-if pgrep -f -- "$CHROME_BIN.*--app=${KIOSK_URL%/}" >/dev/null 2>&1; then
+if pgrep -f -- "${CHROME_BIN}.*--app=${KIOSK_URL%/}" >/dev/null 2>&1; then
   exit 0
 fi
 
@@ -49,6 +57,9 @@ if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -d "${XDG_RUNTIME_DIR}" ]]; then
 fi
 OZONE_PLATFORM="${CHROMIUM_OZONE_PLATFORM:-x11}"
 
+# Do not inherit Debian wrapper flags that enable remote extensions / background net.
+unset CHROMIUM_FLAGS || true
+
 exec "$CHROME_BIN" \
   --start-fullscreen \
   --noerrdialogs \
@@ -58,9 +69,19 @@ exec "$CHROME_BIN" \
   --force-device-scale-factor=1 \
   --kiosk \
   --incognito \
+  --no-first-run \
   --disable-session-crashed-bubble \
-  --disable-features=TranslateUI \
+  --disable-background-networking \
+  --disable-sync \
+  --disable-component-update \
+  --disable-client-side-phishing-detection \
+  --disable-default-apps \
+  --disable-extensions \
+  --disable-component-extensions-with-background-pages \
+  --disable-features=TranslateUI,AutofillServerCommunication,MediaRouter,OptimizationHints \
   --ozone-platform="${OZONE_PLATFORM}" \
   --ozone-platform-hint=x11 \
+  --use-angle=gles \
+  --disable-dev-shm-usage \
   --window-size=1024,600 \
   --app="${KIOSK_URL%/}"

@@ -21,8 +21,11 @@
     background: var(--bg-primary);
     z-index: 100;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
+    padding-top: 38px;
+    box-sizing: border-box;
+    overflow: hidden;
     animation: fadeIn 0.5s ease-out;
 }
 
@@ -30,15 +33,16 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: var(--spacing-2xl);
+    gap: 12px;
     width: 100%;
     max-width: 400px;
 }
 
 .login-logo {
-    width: 320px;
+    width: 300px;
     height: auto;
-    margin-bottom: var(--spacing-lg);
+    margin-top: 8px;
+    margin-bottom: 4px;
     filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.3));
 }
 
@@ -46,14 +50,14 @@
     font-size: 36px;
     font-weight: 700;
     color: var(--text-primary);
-    margin-bottom: var(--spacing-md);
+    margin-bottom: 4px;
     letter-spacing: -0.5px;
 }
 
 .login-form-box {
     display: flex;
     flex-direction: column;
-    gap: var(--spacing-xl);
+    gap: 14px;
     width: 100%;
 }
 
@@ -165,17 +169,21 @@
 .login-footer-info {
     font-size: 18px;
     color: var(--text-secondary);
-    margin-top: 12px;
+    margin-top: 2px;
     text-align: center;
+    position: relative;
+    top: -10px;
 }
 
 .login-footer-link {
     display: block;
-    margin-top: 16px;
+    margin-top: 6px;
     color: #6b7280;
     font-size: 16px;
     text-decoration: none;
     text-align: center;
+    position: relative;
+    top: -10px;
 }
 
 .login-footer-link:hover {

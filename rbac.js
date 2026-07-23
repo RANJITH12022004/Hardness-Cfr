@@ -4,6 +4,9 @@
  * Non-Factory users (including Admin): capability is driven only by permission cards
  * stored in featureOverrides.allow. Role name does not grant feature access.
  * Factory / RLERLT: full access except factory-only routes handled separately.
+ *
+ * Role caps may soften a card-granted feature to view-only; they must never revoke
+ * a feature that was explicitly granted via permission cards (TapDensity card model).
  */
 
 var ROLE_RESTRICTIONS = {
@@ -12,33 +15,15 @@ var ROLE_RESTRICTIONS = {
     'factory-reset': 'no-access',
   },
   supervisor: {
-    'user-manage': 'view-only',
-    'user-add': 'no-access',
-    'user-delete': 'no-access',
-    'user-unlock': 'no-access',
-    'user-enable': 'no-access',
-    'user-change-role': 'no-access',
     'factory-settings': 'view-only',
     'factory-reset': 'no-access',
-    'edit-datetime': 'no-access',
-    'reports-delete': 'no-access',
-    'recipe-delete': 'no-access',
+    // Soft caps only — cards still grant the feature; these limit write actions.
+    'user-manage': 'view-only',
+    'reports-delete': 'view-only',
   },
   user: {
-    'user-manage': 'no-access',
-    'user-add': 'no-access',
-    'user-delete': 'no-access',
-    'user-unlock': 'no-access',
-    'user-enable': 'no-access',
-    'user-change-role': 'no-access',
     'factory-settings': 'no-access',
     'factory-reset': 'no-access',
-    'edit-datetime': 'no-access',
-    'recipe-edit': 'no-access',
-    'recipe-delete': 'no-access',
-    'reports-delete': 'no-access',
-    'validate-menu': 'no-access',
-    'validation-test': 'no-access',
   },
   factory: {},
 };
@@ -63,12 +48,12 @@ var PERMISSION_CARD_KEYS = [
 
 /**
  * Each card expands to internal feature keys used by navigation and checks.
- * Internal keys are unique strings (screen map, action checks, or explicit gates).
+ * Shared cards match TapDensity; Hardness adds calibration cards.
  */
 var PERM_CARD_EXPAND = {
   perm_test_access: ['quick-test', 'recipe-test'],
   perm_test_report_approve: ['test-report-approve'],
-  perm_recipe_manage: ['recipe-manage', 'recipe-list', 'recipe-edit', 'recipe-delete', 'disable-recipes', 'recipe-enable', 'settings'],
+  perm_recipe_manage: ['recipe-manage', 'recipe-list', 'recipe-edit', 'settings'],
   perm_recipe_approve: ['recipe-approve'],
   perm_profile_admin: [
     'user-manage',
@@ -79,7 +64,7 @@ var PERM_CARD_EXPAND = {
     'user-change-role',
     'settings',
   ],
-  perm_validation_test: ['validation-test', 'validate-menu', 'settings'],
+  perm_validation_test: ['validation-test', 'settings'],
   perm_calibration_test: ['calibration-menu', 'settings'],
   perm_validation_report_approve: ['validation-report-approve'],
   perm_calibration_report_approve: ['calibration-report-approve'],
@@ -139,6 +124,8 @@ var ALL_STORABLE_ALLOW_KEYS = PERMISSION_CARD_KEYS.concat(LEGACY_INTERNAL_KEYS);
 var SCREEN_FEATURE_MAP = {
   login: 'login',
   home: 'dashboard',
+  'shape-selection': 'quick-test',
+  'param-tolerance': 'recipe-manage',
   'quick-test': 'quick-test',
   'test-run': 'recipe-test',
   'manage-recipes': 'recipe-manage',
@@ -152,6 +139,7 @@ var SCREEN_FEATURE_MAP = {
   'validate-type-select': 'validation-test',
   'load-validation': 'validation-test',
   'distance-validation': 'validation-test',
+  'distance-validation-result': 'validation-test',
   'validation-run': 'validation-test',
   'calibration-type-select': 'calibration-menu',
   'load-calibration': 'calibration-menu',
@@ -319,8 +307,8 @@ function getEffectiveRestriction(roleOrUser, featureKey) {
 
   if (featureKey === 'dashboard' || featureKey === 'login') return 'full-access';
   if (featureKey === 'profile') return 'full-access';
+  // Hardness-only network utility (not a permission card).
   if (featureKey === 'ip-configure') return 'full-access';
-  if (featureKey === 'settings') return 'full-access';
 
   if (featureKey === 'factory-settings' || featureKey === 'factory-reset') {
     return role === 'factory' ? 'full-access' : 'no-access';
@@ -336,8 +324,8 @@ function getEffectiveRestriction(roleOrUser, featureKey) {
   });
   if (!hasFeature) return 'no-access';
 
+  // Cards drive access: role may soften to view-only, but must not revoke a card grant.
   var roleCap = getRestriction(role, featureKey);
-  if (roleCap === 'no-access') return 'no-access';
   if (roleCap === 'view-only') return 'view-only';
   return 'full-access';
 }
@@ -367,7 +355,7 @@ function canPerformAction(roleOrUser, featureKey, action) {
 }
 
 function checkNavigationAccess(screenId) {
-  if (screenId === 'login') return true;
+  if (screenId === 'login' || screenId === 'password-expired-reset') return true;
   var userObj = (typeof window !== 'undefined' && window.currentUser) ? window.currentUser : null;
   var role = getCurrentRole();
   if (!role && !userObj) return false;
@@ -379,7 +367,32 @@ function checkNavigationAccess(screenId) {
   var featureKey = SCREEN_FEATURE_MAP[screenId] || screenId;
   if (screenId === 'manage-recipes') {
     var mode = (typeof window !== 'undefined' && window.recipeListMode) ? window.recipeListMode : 'manage';
-    featureKey = mode === 'load' ? 'recipe-test' : 'recipe-manage';
+    // Load-recipe list uses recipeListLoadOnly in Hardness (TapDensity uses recipeListMode).
+    if (typeof window !== 'undefined' && window.recipeListLoadOnly) {
+      featureKey = 'recipe-test';
+    } else {
+      featureKey = mode === 'load' ? 'recipe-test' : 'recipe-manage';
+    }
+  }
+  // Shared shape picker: Quick Test needs quick-test; Create/Edit Recipe needs recipe-manage.
+  if (screenId === 'shape-selection') {
+    var ct = (typeof window !== 'undefined' && window.currentTest != null)
+      ? window.currentTest
+      : (typeof currentTest !== 'undefined' ? currentTest : null);
+    if (ct === 'create-recipe' || ct === 'edit-recipe') {
+      return canAccess(userObj || role, 'recipe-manage');
+    }
+    if (ct === 'quick' || ct === 'quick-test') {
+      return canAccess(userObj || role, 'quick-test');
+    }
+    return canAccess(userObj || role, 'quick-test') || canAccess(userObj || role, 'recipe-manage');
+  }
+  if (screenId === 'param-tolerance') {
+    return canAccess(userObj || role, 'recipe-manage') || canAccess(userObj || role, 'recipe-edit');
+  }
+  // Quick Test run screen is shared with recipe runs: allow either card key.
+  if (screenId === 'test-run') {
+    return canAccess(userObj || role, 'quick-test') || canAccess(userObj || role, 'recipe-test');
   }
   if (screenId === 'validate') {
     return canAccessValidationOrCalibration(userObj || role);

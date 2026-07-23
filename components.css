@@ -48,9 +48,8 @@
 }
 
 /* Factory settings: scrollable content with smooth scroll */
-#page-factory-settings .page-content {
+#page-factory-settings {
     overflow-y: auto;
-    max-height: calc(100vh - 120px);
     scroll-behavior: smooth;
     -webkit-overflow-scrolling: touch;
 }
@@ -318,23 +317,19 @@
     box-shadow: var(--shadow-md);
 }
 
-.shape-card#shape-oblong {
-    background: linear-gradient(135deg, rgba(124, 58, 237, 0.3), rgba(109, 40, 217, 0.2));
-    border-color: rgba(167, 139, 250, 0.3);
-}
-
+.shape-card#shape-oblong,
 .shape-card#shape-round {
-    background: linear-gradient(135deg, rgba(37, 99, 235, 0.3), rgba(29, 78, 216, 0.2));
-    border-color: rgba(96, 165, 250, 0.3);
+    background: var(--glass-bg);
+    border-color: var(--glass-border);
 }
 
 .shape-card::before {
     content: '';
     position: absolute;
     inset: 0;
-    background: radial-gradient(circle at top right, rgba(255, 255, 255, 0.1), transparent);
+    background: radial-gradient(circle at top right, rgba(255, 255, 255, 0.08), transparent 55%);
     opacity: 0;
-    transition: opacity 0.4s ease;
+    transition: opacity 0.25s ease;
 }
 
 .shape-card:hover::before {
@@ -342,45 +337,43 @@
 }
 
 .shape-card:hover {
-    transform: translateY(-6px) scale(1.02);
+    transform: translateY(-4px);
     box-shadow: var(--shadow-xl);
 }
 
-.shape-card#shape-oblong:hover {
-    border-color: rgba(167, 139, 250, 0.6);
-    box-shadow: 0 20px 60px rgba(124, 58, 237, 0.4);
-}
-
+.shape-card#shape-oblong:hover,
 .shape-card#shape-round:hover {
-    border-color: rgba(96, 165, 250, 0.6);
-    box-shadow: 0 20px 60px rgba(37, 99, 235, 0.4);
+    border-color: rgba(255, 255, 255, 0.4);
+    box-shadow: var(--shadow-xl);
 }
 
-/* iOS Active Selection Style */
+/* Active selection */
 .shape-card.active {
-    background: linear-gradient(135deg, rgba(52, 199, 89, 0.4), rgba(48, 209, 88, 0.3));
-    border-color: var(--color-success);
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(52, 199, 89, 0.95);
     border-width: 2px;
-    transform: scale(1.05);
-    /* Reduced scale */
-    box-shadow: 0 0 0 4px rgba(52, 199, 89, 0.2),
-        var(--shadow-xl);
+    transform: translateY(-2px);
+    box-shadow: 0 0 0 3px rgba(52, 199, 89, 0.22), var(--shadow-xl);
 }
 
 .shape-card.active::after {
-    content: 'âœ“ Selected';
+    content: '✓';
     position: absolute;
-    top: var(--spacing-sm);
-    right: var(--spacing-sm);
+    top: 14px;
+    right: 14px;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     background: var(--color-success);
     color: white;
-    padding: 4px 10px;
-    border-radius: var(--radius-full);
-    font-size: 11px;
+    border-radius: 50%;
+    font-size: 14px;
     font-weight: 700;
-    letter-spacing: 0.5px;
     box-shadow: var(--shadow-sm);
-    display: none;
+    padding: 0;
+    letter-spacing: 0;
 }
 
 .shape-visual {
@@ -1012,8 +1005,16 @@ select.input-field {
 }
 
 /* ===== REPORTS PAGE (Disintegration-style) ===== */
+/* ===== REPORTS PAGE (Disintegration-style) ===== */
 .reports-container {
     max-width: 1000px;
+}
+
+#page-report-preview.active .reports-container,
+#page-recipe-print-preview.active .reports-container,
+#page-recipe-print-preview .reports-container {
+    max-width: 100% !important;
+    width: 100% !important;
 }
 
 .reports-page-layout {
@@ -1168,16 +1169,17 @@ select.input-field {
 /* ===== REPORT PREVIEW - A4 View (dteooo style) ===== */
 .report-preview-container {
     width: 100%;
-    max-width: 210mm;
+    max-width: 100%;
     min-height: 297mm;
     background: white;
     color: black;
     padding: 12mm;
-    margin: 20px auto;
+    margin: 12px 0;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
     font-family: 'Times New Roman', serif;
     font-size: 10pt;
     line-height: 1.4;
+    box-sizing: border-box;
 }
 
 .report-preview-container h1 {
@@ -1320,10 +1322,12 @@ select.input-field {
     display: flex;
     gap: 12px;
     margin-top: 24px;
-    padding: 0 20px 20px;
-    max-width: 800px;
-    margin-left: auto;
-    margin-right: auto;
+    padding: 0 0 20px;
+    max-width: 100%;
+    width: 100%;
+    margin-left: 0;
+    margin-right: 0;
+    box-sizing: border-box;
 }
 
 .report-preview-actions button {

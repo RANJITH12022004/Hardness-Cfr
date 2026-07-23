@@ -53,6 +53,24 @@ Scale serial format used by app:
 - Stop bits: `1`
 - Reader mode: `frame` (fixed-size frames, default frame size `8` bytes)
 
+**Hardness build note:** On this device `/dev/ttyAMA5` is wired to the **R307 fingerprint**
+sensor (57600 baud), not the scale. Set `BIOMETRIC_PORT=/dev/ttyAMA5` and leave
+`SCALE_PORT` empty (or point scale at another UART). Opening both on AMA5 causes
+biometric timeouts (`Timeout while reading fingerprint packet`).
+
+---
+
+### R307 Fingerprint (Hardness)
+
+| Raspberry Pi       | R307 | Device Node   |
+|--------------------|------|---------------|
+| GPIO12 (Pin 32)    | RX   | /dev/ttyAMA5  |
+| GPIO13 (Pin 33)    | TX   |               |
+| GND                | GND  |               |
+
+- Baud: `57600`
+- Env: `BIOMETRIC_PORT=/dev/ttyAMA5`, `BIOMETRIC_BAUD=57600`
+
 ---
 
 ### RTC (DS1307)

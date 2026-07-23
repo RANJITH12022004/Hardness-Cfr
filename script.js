@@ -24,11 +24,11 @@ let loadRecipeRunPending = false; // True when backoff modal was shown from Load
 let editingRecipeId = null; // Recipe ID when editing (PUT instead of POST on save)
 let lastDisplayedRecipes = null; // Cached recipe list from displayRecipeList for faster Load
 
-/** Approved-by line may contain "(supervisor)" from stored reports — show as Reviewer. */
+/** Approved-by line: name only (strip legacy "(role)" suffix). */
 function formatApprovedByLine(line) {
     var s = String(line || '').trim();
     if (!s || s === '--') return '--';
-    return s.replace(/\(\s*supervisor\s*\)/gi, '(Reviewer)');
+    return s.replace(/\s*\([^)]*\)\s*$/g, '').trim() || '--';
 }
 let recipeListLoadOnly = false; // True when opened via Load Recipe (hide Create/Edit/Delete)
 let hardwareEventSource = null; // SSE: ESP lines ERR,BO* / ERR,LC* → unified backoff error modal + recovery
@@ -121,7 +121,7 @@ function completeEspBackoffDismissal(reportId, recipeForUi) {
         }
     }
     if (reportId && typeof openReportPreview === 'function') {
-        openReportPreview(reportId);
+        openReportPreview(reportId, { bypassRbac: true });
     } else if (typeof goToPage === 'function') {
         _navigatingAfterAbort = true;
         goToPage('home');
@@ -146,6 +146,9 @@ function initHardwareStream() {
                 var data = JSON.parse(event.data);
                 if (data.type !== 'data' || !data.line) return;
                 var line = (String(data.line)).trim().toUpperCase();
+                if (typeof applyTestRunLiveHardwareLine === 'function') {
+                    applyTestRunLiveHardwareLine(line);
+                }
                 var isEspBackoffError =
                     line === 'ERR,BO*' ||
                     line.indexOf('ERR,BO') !== -1 ||
@@ -353,16 +356,28 @@ function goToPage(pageName) {
     console.log('[DEBUG] goToPage: navigating to', pageName);
 
     {
-        // Check navigation access using RBAC
-        if (typeof checkNavigationAccess === 'function') {
+        // Check navigation access using RBAC (TapDensity: skip gate for login + first/expired password reset —
+        // those screens run before currentUser/session is established).
+        if (typeof checkNavigationAccess === 'function' && pageName !== 'password-expired-reset') {
             var skipRbac =
                 pageName === 'report-preview' &&
                 typeof window !== 'undefined' &&
                 window._bypassReportPreviewRbacOnce;
+            var skipNavForEditMember =
+                pageName === 'add-member' &&
+                typeof editingMemberId !== 'undefined' &&
+                editingMemberId != null;
             if (skipRbac) {
                 window._bypassReportPreviewRbacOnce = false;
+            } else if (skipNavForEditMember) {
+                if (typeof canEditMembers === 'function' && !canEditMembers()) {
+                    if (typeof showAppModal === 'function') showAppModal('You do not have permission to edit profiles.', 'Permission');
+                    else alert('You do not have permission to edit profiles.');
+                    return;
+                }
             } else if (!checkNavigationAccess(pageName)) {
-                alert('You do not have permission to access this page.');
+                if (typeof showAppModal === 'function') showAppModal('You do not have permission to access this page.', 'Permission');
+                else alert('You do not have permission to access this page.');
                 return;
             }
         }
@@ -461,8 +476,6 @@ function goToPage(pageName) {
         'approval-verify': 'Approval Required',
         'test-run': 'Test Run',
         'factory-settings': 'Factory Settings',
-        'factory-support': 'Factory Support',
-        'factory-support-result': 'Factory Support',
         'export': 'Export',
         'ip-configure': 'IP Configure',
         'disable-recipes': 'Disabled Recipes',
@@ -600,22 +613,6 @@ if (pageName === 'factory-settings') {
             }
         }, 50);
     }
-
-    if (pageName === 'factory-support') {
-        setTimeout(() => {
-            if (typeof initFactorySupportPage === 'function') {
-                initFactorySupportPage();
-            }
-        }, 50);
-    }
-
-    if (pageName === 'factory-support-result') {
-        setTimeout(() => {
-            if (typeof initFactorySupportResultPage === 'function') {
-                initFactorySupportResultPage();
-            }
-        }, 50);
-    }
 }
 
 function goBack() {
@@ -645,10 +642,6 @@ function goBack() {
     } else if (pageId === 'page-view-recipes') {
         goToPage('reports');
     } else if (pageId === 'page-factory-settings') {
-        goToPage('settings');
-    } else if (pageId === 'page-factory-support-result') {
-        goToPage('factory-support');
-    } else if (pageId === 'page-factory-support') {
         goToPage('settings');
     } else if (pageId === 'page-load-calibration' || pageId === 'page-distance-zero-calibration') {
         if (typeof abortCalibrationAndGoBack === 'function') {
@@ -814,12 +807,24 @@ async function login() {
         });
         var ct = res.headers.get('content-type') || '';
         var data = {};
-        if (ct.indexOf('json') !== -1) {
-            data = await res.json();
-        } else {
-            data = { error: await res.text() };
+        try {
+            if (ct.indexOf('json') !== -1) {
+                data = await res.json();
+            } else {
+                var textBody = await res.text();
+                try {
+                    data = textBody ? JSON.parse(textBody) : {};
+                } catch (parseErr) {
+                    data = { error: textBody || ('Login failed (HTTP ' + res.status + ').') };
+                }
+            }
+        } catch (parseErr) {
+            data = { error: 'Invalid server response during login. Please try again.' };
         }
-        if (res.ok && data.success && data.user) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            data = { error: 'Invalid server response during login. Please try again.' };
+        }
+        if (res.ok && data.success && data.user && typeof data.user === 'object' && !Array.isArray(data.user)) {
             setLoggedInUser(data.user, uidEl, pwdEl);
             return;
         }
@@ -850,6 +855,9 @@ async function login() {
         else alert(msg);
     } catch (e) {
         var emsg = 'Login failed: ' + (e && e.message ? e.message : 'Network error');
+        if (/json|unexpected token|unexpected end/i.test(emsg)) {
+            emsg = 'Login failed: invalid server response. Please try again.';
+        }
         if (typeof showAppModal === 'function') showAppModal(emsg, 'Login Error');
         else alert(emsg);
     }
@@ -1007,17 +1015,20 @@ function startQuickTest() {
     // Quick Test should always start blank (no localStorage restore).
     // Clear any previously entered values before starting the flow.
     if (typeof refreshQuickTestForm === 'function') refreshQuickTestForm();
+    currentTest = 'quick';
+    if (typeof window !== 'undefined') window.currentTest = 'quick';
     if (typeof sendTareOncePerSession === 'function') sendTareOncePerSession('quick-test');
     goToPage('shape-selection');
-    currentTest = 'quick';
 }
 
 function startRecipeTest() {
     // Ensure Load Recipe runs are not treated as Quick Test.
     // Some logic (tolerance popup + report RESULT) skips when currentTest === 'quick'.
     currentTest = 'load-recipe';
+    if (typeof window !== 'undefined') window.currentTest = 'load-recipe';
     if (typeof sendTareOncePerSession === 'function') sendTareOncePerSession('load-recipe');
     recipeListLoadOnly = true;
+    if (typeof window !== 'undefined') window.recipeListLoadOnly = true;
     goToPage('manage-recipes');
     setTimeout(() => {
         displayRecipeList();
@@ -1026,6 +1037,7 @@ function startRecipeTest() {
 
 function manageRecipes() {
     recipeListLoadOnly = false;
+    if (typeof window !== 'undefined') window.recipeListLoadOnly = false;
     goToPage('manage-recipes');
 }
 
@@ -1033,6 +1045,7 @@ function startRecipeCreation() {
     // Navigate to shape selection for creating a new recipe
     editingRecipeId = null;
     currentTest = 'create-recipe';
+    if (typeof window !== 'undefined') window.currentTest = 'create-recipe';
     selectShape('round'); // Default to round which resets UI
     updateShapeInputs(); // Ensure inputs are correct
     goToPage('shape-selection');
@@ -1045,9 +1058,14 @@ function selectShape(shape) {
     // Update UI
     document.querySelectorAll('.shape-card').forEach(card => {
         card.classList.remove('active');
+        card.setAttribute('aria-pressed', 'false');
     });
 
-    document.getElementById(`shape-${shape}`).classList.add('active');
+    var selected = document.getElementById(`shape-${shape}`);
+    if (selected) {
+        selected.classList.add('active');
+        selected.setAttribute('aria-pressed', 'true');
+    }
 
     // Update parameter labels based on shape (if using dynamic single label, kept for compatibility)
     const paramLabel = document.getElementById('param-label-1');
@@ -1122,7 +1140,7 @@ function refreshQuickTestForm() {
     });
     samplesIds.forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.value = '0';
+        if (el) el.value = '';
     });
 
     const modeAuto = document.querySelector('input[name="mode"][value="auto"]');
@@ -1173,9 +1191,37 @@ function enforceQuickTestSampleSelectionRules() {
         const n = parseInt(raw, 10);
         if (cb.checked && (isNaN(n) || n <= 0)) {
             cb.checked = false;
-            samplesEl.value = '0';
+            samplesEl.value = '';
         }
     });
+}
+
+// Max sample index that still has at least one parameter to measure (capped by sampleSize).
+function getEffectiveMaxSample(recipe) {
+    var sampleSize = parseInt(recipe && recipe.sampleSize, 10);
+    if (isNaN(sampleSize) || sampleSize < 1) sampleSize = 10;
+    sampleSize = Math.min(sampleSize, 100);
+    var ps = (recipe && recipe.parameterSamples) || {};
+    var params = (recipe && recipe.parameters) || {};
+    var maxN = 0;
+    var paramKeys = Object.keys(params);
+    if (paramKeys.length === 0) {
+        Object.keys(ps).forEach(function (k) {
+            var n = parseInt(ps[k], 10);
+            if (!isNaN(n) && n > maxN) maxN = n;
+        });
+    } else {
+        paramKeys.forEach(function (k) {
+            var sampleKey = Object.keys(ps).find(function (pk) {
+                return (pk || '').toLowerCase() === (k || '').toLowerCase();
+            });
+            var n = sampleKey != null ? parseInt(ps[sampleKey], 10) : sampleSize;
+            if (isNaN(n) || n < 0) n = sampleSize;
+            if (n > maxN) maxN = n;
+        });
+    }
+    if (maxN <= 0) maxN = sampleSize;
+    return Math.min(Math.max(maxN, 1), sampleSize);
 }
 
 // Returns which parameters to measure for sample index (1-based)
@@ -1191,13 +1237,16 @@ function getParametersForSample(sampleIndex, recipe) {
     const params = recipe.parameters || {};
     const hasParam = function (p) {
         var key = Object.keys(params).find(function (k) { return (k || '').toLowerCase() === p.toLowerCase(); });
-        if (key == null) return false;
-        var v = params[key];
-        return v !== '' && (v != null || v === 0) && (typeof v === 'number' ? !isNaN(v) : true);
+        if (key != null) return true;
+        var samplesKey = Object.keys(ps).find(function (k) { return (k || '').toLowerCase() === p.toLowerCase(); });
+        if (samplesKey == null) return false;
+        var sampleCount = parseInt(ps[samplesKey], 10);
+        return !isNaN(sampleCount) && sampleCount > 0;
     };
     return paramOrder.filter(function (p) {
         if (!hasParam(p)) return false;
-        const n = ps[p] !== undefined ? parseInt(ps[p], 10) : totalSamples;
+        const sampleKey = Object.keys(ps).find(function (k) { return (k || '').toLowerCase() === p.toLowerCase(); });
+        const n = sampleKey != null ? parseInt(ps[sampleKey], 10) : totalSamples;
         if (n <= 0) return false;
         return sampleIndex <= n;
     });
@@ -1267,12 +1316,11 @@ function getRecipeFromForm() {
             if (val === '' && paramTolerances[label] != null && paramTolerances[label].nominal !== undefined && paramTolerances[label].nominal !== '') {
                 val = String(paramTolerances[label].nominal);
             }
-            if (val === '') val = '0';
             parameters[label] = val;
-            const samplesId = labelToSamplesId[label];
+            const samplesId = (typeof resolveParamSamplesId === 'function') ? resolveParamSamplesId(label) : labelToSamplesId[label];
             if (samplesId) {
                 const samplesEl = document.getElementById(samplesId);
-                const raw = samplesEl ? (samplesEl.value || '').trim() : '';
+                const raw = samplesEl ? normalizeSamplesFieldValue(samplesEl.value) : '';
                 const totalN = (function () {
                     const n = parseInt(sampleSize, 10);
                     return isNaN(n) ? 10 : Math.min(Math.max(n, 1), 100);
@@ -1419,13 +1467,13 @@ function restoreQuickTestLastValues() {
                     if (data.parameterSamples && data.parameterSamples.hasOwnProperty(label)) {
                         samples.value = String(data.parameterSamples[label]);
                     } else {
-                        samples.value = data.sampleSize ? String(data.sampleSize) : '0';
+                        samples.value = data.sampleSize ? String(data.sampleSize) : '';
                     }
                 }
             } else {
                 if (cb) cb.checked = false;
                 if (val) val.value = '';
-                if (samples) samples.value = '0';
+                if (samples) samples.value = '';
             }
         });
         const modeEl = document.querySelector(`input[name="mode"][value="${data.mode || 'auto'}"]`);
@@ -1501,26 +1549,16 @@ function showBackoffModal() {
         input.max = '1.57';
         input.step = '0.01';
         input.placeholder = 'max 1.57';
-        if (loadRecipeRunPending) {
-            input.value = '';
-        } else {
-            var prev = parseFloat(input.value);
-            var minInch = 2 / 25.4;
-            input.value = (isNaN(prev) || prev < minInch) ? minInch.toFixed(2) : (prev > 1.57 ? '1.57' : prev.toFixed(2));
-        }
+        input.value = '';
     } else {
         input.min = '2';
         input.max = '40';
         input.step = '0.01';
         input.placeholder = '';
-        if (loadRecipeRunPending) {
-            input.value = '';
-        } else {
-            var prev = parseFloat(input.value);
-            input.value = (isNaN(prev) || prev < 2) ? 2 : (prev > 40 ? 40 : prev);
-        }
+        input.value = '';
     }
     modal.style.display = 'flex';
+    if (typeof focusInputWithOSK === 'function') focusInputWithOSK(input);
 }
 
 function closeBackoffModal() {
@@ -1702,6 +1740,10 @@ async function startTest() {
 // ===== API HELPER FUNCTIONS =====
 async function apiRequest(endpoint, options = {}) {
     try {
+        var url = endpoint;
+        if (typeof url === 'string' && url.indexOf('undefined/') === 0) {
+            url = url.slice('undefined'.length);
+        }
         const opts = options || {};
         const headers = {
             'Content-Type': 'application/json',
@@ -1724,10 +1766,20 @@ async function apiRequest(endpoint, options = {}) {
         if (opts.body !== undefined) {
             fetchOpts.body = typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body);
         }
-        const response = await fetch(endpoint, fetchOpts);
+        const response = await fetch(url, fetchOpts);
         if (!response.ok) {
-            const error = await response.json().catch(() => ({ error: 'Request failed' }));
-            throw new Error(error.error || `HTTP ${response.status}`);
+            var rawText = '';
+            try { rawText = await response.text(); } catch (e) { rawText = ''; }
+            var error = {};
+            try { error = rawText ? JSON.parse(rawText) : {}; } catch (e) { error = {}; }
+            var msg = error.error || error.message || '';
+            if (!msg) {
+                msg = rawText && rawText.length < 180 ? rawText : ('Request failed (HTTP ' + response.status + ')');
+            }
+            if (response.status === 403 && /permission|forbidden/i.test(msg)) {
+                // Keep server text; callers may specialize.
+            }
+            throw new Error(msg);
         }
         const ct = response.headers.get('content-type') || '';
         if (ct.indexOf('json') !== -1) {
@@ -1775,7 +1827,7 @@ async function saveReport(reportData) {
         return result.id || result.report?.id;
     } catch (e) {
         console.error('Failed to save report:', e);
-        return null;
+        throw e;
     }
 }
 
@@ -2029,16 +2081,14 @@ async function handlePrintRecipeA4() {
         return;
     }
     try {
-        var r = await fetch('/api/print/a4', {
+        var result = await apiRequest('/api/print/a4', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'recipe', recipe_data: currentRecipeForPrint })
+            body: { type: 'recipe', recipe_data: currentRecipeForPrint }
         });
-        var result = await r.json().catch(function () { return {}; });
-        if (r.ok && result.success !== false) {
+        if (result && result.success !== false && !result.error) {
             alert('Sent to A4 printer.');
         } else {
-            alert(result.error || 'A4 print failed. Check printer connection.');
+            alert((result && result.error) || 'A4 print failed. Check printer connection.');
         }
     } catch (e) {
         console.error('Recipe A4 print error:', e);
@@ -2052,20 +2102,86 @@ async function handlePrintRecipeThermal() {
         return;
     }
     try {
-        var r = await fetch('/api/print/thermal', {
+        var result = await apiRequest('/api/print/thermal', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'recipe', recipe_data: currentRecipeForPrint })
+            body: { type: 'recipe', recipe_data: currentRecipeForPrint }
         });
-        var result = await r.json().catch(function () { return {}; });
-        if (r.ok && result.success !== false) {
+        if (result && result.success !== false && !result.error) {
             alert('Sent to thermal printer.');
         } else {
-            alert(result.error || 'Thermal print failed. Check printer connection.');
+            alert((result && result.error) || 'Thermal print failed. Check printer connection.');
         }
     } catch (e) {
         console.error('Recipe thermal print error:', e);
         alert('Print failed: ' + (e.message || 'Check printer connection.'));
+    }
+}
+
+async function handleExportRecipe() {
+    if (!currentRecipeForPrint) {
+        alert('No recipe to export. Open a recipe from View Recipe first.');
+        return;
+    }
+    var u = window.currentUser;
+    if (typeof userCanExportToUsb === 'function' && !userCanExportToUsb(u)) {
+        alert('You do not have permission to export to USB.');
+        return;
+    }
+    var role = typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '';
+    var titleText = 'Export Recipe';
+    try {
+        var token = '';
+        if (typeof _ensureExportApprovalToken === 'function') {
+            token = await _ensureExportApprovalToken();
+            if (role !== 'factory' && !token) {
+                alert('Export cancelled — approval is required.');
+                return;
+            }
+        }
+        var exportHeaders = token ? { 'X-Approval-Verify-Token': token } : {};
+        if (typeof showLoadingOverlay === 'function') {
+            showLoadingOverlay(titleText, 'Detecting external pendrive...', { cancellable: false });
+        }
+        var usbData = await apiRequest('/api/usb/list');
+        var devices = (usbData && usbData.devices) ? usbData.devices : [];
+        if (!devices.length) {
+            if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+            alert('No external pendrive detected. Please connect a USB pendrive and try again.');
+            return;
+        }
+        var devicePath;
+        if (devices.length === 1) {
+            devicePath = devices[0].path;
+        } else if (typeof pickPendrive === 'function') {
+            devicePath = await pickPendrive(devices);
+        } else {
+            if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+            alert('Multiple pendrives detected. Connect only one and try again.');
+            return;
+        }
+        if (!devicePath) {
+            if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+            alert('Export cancelled.');
+            return;
+        }
+        if (typeof setLoadingProgress === 'function') {
+            setLoadingProgress(40, 'Exporting recipe to USB...', '');
+        }
+        var result = await apiRequest('/api/recipes/export', {
+            method: 'POST',
+            headers: exportHeaders,
+            body: {
+                recipe_data: currentRecipeForPrint,
+                device_path: devicePath
+            }
+        });
+        if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+        alert(typeof exportSuccessUserMessage === 'function'
+            ? exportSuccessUserMessage(result, 'Recipe')
+            : ('Recipe exported to USB' + (result && result.export_directory ? (':\n' + result.export_directory) : '')));
+    } catch (e) {
+        if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+        alert('Recipe export failed: ' + (e && e.message ? e.message : 'Unknown error'));
     }
 }
 
@@ -2106,16 +2222,39 @@ function formatDurationSeconds(sec) {
 // ===== REPORT PREVIEW =====
 async function populateReportPreviewDom(stored) {
     currentReportData = stored || null;
+
+    // Prefer A4 print text on screen (same layout as Print A4), scaled to fill width.
+    if (typeof renderReportA4TextPreview === 'function' && renderReportA4TextPreview(stored)) {
+        window._lastReportPreview = stored || null;
+        var ridForPrint = currentReportId != null ? currentReportId : (stored && stored.id);
+        if (ridForPrint != null && typeof buildReportPrintPayload === 'function') {
+            currentReportData = buildReportPrintPayload(stored, ridForPrint);
+        }
+        if (typeof applyReportPreviewLockUi === 'function') {
+            applyReportPreviewLockUi(stored);
+        }
+        if (typeof updateReportPreviewPrintExportButtons === 'function') {
+            updateReportPreviewPrintExportButtons(stored);
+        }
+        // Refit after approval panel / action bar layout settles.
+        requestAnimationFrame(function () {
+            if (typeof fitA4TextPreviewToWidth === 'function') fitA4TextPreviewToWidth();
+        });
+        return;
+    }
+
+    if (typeof showReportHtmlPreview === 'function') {
+        showReportHtmlPreview();
+    }
+
     var reportType = (stored && stored.type) ? stored.type : 'test';
     var isValidationOrCalibration = (reportType === 'validation' || reportType === 'calibration');
 
     // Show/hide sections based on report type
     var valCalSection = document.getElementById('report-validation-calibration-section');
     var testSections = document.getElementById('report-test-sections');
-    var signoffSection = document.getElementById('report-signoff-section');
     if (valCalSection) valCalSection.style.display = isValidationOrCalibration ? 'block' : 'none';
     if (testSections) testSections.style.display = isValidationOrCalibration ? 'none' : 'block';
-    if (signoffSection) signoffSection.style.display = 'block';
 
     // Hide Preview Recipe button for validation/calibration; show only for test reports
     var previewRecipeBtn = document.getElementById('btn-preview-recipe');
@@ -2156,7 +2295,9 @@ async function populateReportPreviewDom(stored) {
         }
     }
 
-    const recipe = (stored && (stored.recipe || stored.testData || stored.data)) ? (stored.recipe || stored.testData || stored.data) : (lastTestRunRecipe || {
+    const recipeIdentity = (stored && stored.recipe) ? stored.recipe : {};
+    const tdForRecipe = (stored && stored.testData) ? stored.testData : {};
+    const recipeFallback = lastTestRunRecipe || {
         productName: 'Product ABC',
         batchNumber: 'BN123445',
         shape: 'round',
@@ -2164,14 +2305,41 @@ async function populateReportPreviewDom(stored) {
         parameterTolerances: {},
         unit: 'Newton (N)',
         sampleSize: 10
+    };
+    // Merge: testData holds full run payload; stripped recipe only supplies identity fields.
+    const recipe = Object.assign({}, recipeFallback, tdForRecipe, {
+        id: recipeIdentity.id != null ? recipeIdentity.id : (tdForRecipe.id != null ? tdForRecipe.id : recipeFallback.id),
+        name: recipeIdentity.name || tdForRecipe.name || recipeFallback.name,
+        productName: recipeIdentity.productName || tdForRecipe.productName || recipeFallback.productName,
+        batchNumber: recipeIdentity.batchNumber || tdForRecipe.batchNumber || tdForRecipe.batch || recipeFallback.batchNumber,
+        unit: recipeIdentity.unit || tdForRecipe.unit || recipeFallback.unit
     });
+    if (tdForRecipe.sampleSize != null) recipe.sampleSize = tdForRecipe.sampleSize;
+    if (tdForRecipe.parameters) recipe.parameters = tdForRecipe.parameters;
+    if (tdForRecipe.parameterSamples) recipe.parameterSamples = tdForRecipe.parameterSamples;
+    if (tdForRecipe.parameterTolerances) recipe.parameterTolerances = tdForRecipe.parameterTolerances;
+    if (tdForRecipe.shape) recipe.shape = tdForRecipe.shape;
+    if (tdForRecipe.mode) recipe.mode = tdForRecipe.mode;
+    if (tdForRecipe.distanceUnit) recipe.distanceUnit = tdForRecipe.distanceUnit;
+    if (tdForRecipe.weightUnit) recipe.weightUnit = tdForRecipe.weightUnit;
     currentReportRecipe = recipe;
 
     const shape = (recipe.shape || 'round').toLowerCase();
     const params = recipe.parameters || {};
     const tolerances = recipe.parameterTolerances || {};
     const unit = recipe.unit || 'Newton (N)';
-    const sampleSize = Math.min(parseInt(recipe.sampleSize) || 10, 100);
+    var sampleSizeRaw = parseInt(recipe.sampleSize, 10);
+    if (isNaN(sampleSizeRaw) || sampleSizeRaw < 1) sampleSizeRaw = 10;
+    // Prefer longest measurement array so preview rows match recorded data
+    var measForSize = (stored && stored.testData && stored.testData.measurements) ? stored.testData.measurements : null;
+    if (measForSize && typeof measForSize === 'object') {
+        var maxLen = 0;
+        Object.keys(measForSize).forEach(function (k) {
+            if (Array.isArray(measForSize[k]) && measForSize[k].length > maxLen) maxLen = measForSize[k].length;
+        });
+        if (maxLen > sampleSizeRaw) sampleSizeRaw = maxLen;
+    }
+    const sampleSize = Math.min(sampleSizeRaw, 100);
 
     // Factory / identification from stored report (saved with report by backend)
     const fs = (stored && (stored.factorySettings || (stored.testData && stored.testData.factorySettings))) || {};
@@ -2228,9 +2396,9 @@ async function populateReportPreviewDom(stored) {
     // Settings table: only selected params
     var settingsRows = reportParamCols.map(function (col) {
         var paramKey = col;
-        var nominal = params[paramKey] != null ? params[paramKey] : (params.Diameter != null && col === 'Diameter' ? params.Diameter : (params.Length != null && col === 'Length' ? params.Length : '--'));
-        if (nominal === undefined || nominal === null) nominal = '--';
-        return { label: col.toUpperCase(), param: paramKey, nominal: nominal, tol: tolerances[paramKey] };
+        var nominalVal = getParamNominalForTolerance(paramKey, params, tolerances);
+        var nominal = isNaN(nominalVal) ? '--' : nominalVal;
+        return { label: col.toUpperCase(), param: paramKey, nominal: nominal, tol: getToleranceForParam(tolerances, paramKey) || {} };
     });
     const settingsBody = document.getElementById('report-settings-body');
     if (settingsBody) {
@@ -2265,9 +2433,9 @@ async function populateReportPreviewDom(stored) {
             if (val === 'OL' || (typeof val === 'string' && String(val).toUpperCase() === 'OL')) { hasFail = true; return; }
             var numVal = typeof val === 'number' ? val : parseFloat(val);
             if (isNaN(numVal)) return;
-            var nominal = params[col] != null ? parseFloat(params[col]) : NaN;
-            if (isNaN(nominal)) nominal = (params.Diameter != null && col === 'Diameter') ? parseFloat(params.Diameter) : (params.Length != null && col === 'Length') ? parseFloat(params.Length) : NaN;
-            var tol = tolerances[col] || {};
+            var nominal = getParamNominalForTolerance(col, params, tolerances);
+            var tol = getToleranceForParam(tolerances, col) || {};
+            if (isNaN(nominal)) return;
             var status = checkT1T2One(numVal, nominal, tol);
             if (status === 'FAIL') hasFail = true;
             else if (status === 'T2_DEVIATION') hasT2 = true;
@@ -2370,10 +2538,20 @@ async function populateReportPreviewDom(stored) {
             reportParamCols.forEach(function (col) {
                 var disp = '--';
                 if (rowName === 'SAMPLES') {
-                    disp = (stats && stats[col] && stats[col].count != null) ? stats[col].count : (paramSamples[col] != null ? paramSamples[col] : (col !== 'Weight' ? sampleSize : '--'));
+                    var count = (stats && stats[col] && stats[col].count != null)
+                        ? stats[col].count
+                        : (paramSamples[col] != null ? paramSamples[col] : (col !== 'Weight' ? sampleSize : null));
+                    disp = formatStatCell(count, 0, 3);
+                } else if (rowName === 'Srel') {
+                    if (stats && stats[col] && stats[col][dataKey] != null) {
+                        disp = formatStatRsd(stats[col][dataKey], 6);
+                    } else {
+                        disp = formatStatCell('--', null, 6);
+                    }
                 } else if (stats && stats[col] && stats[col][dataKey] != null) {
-                    var v = stats[col][dataKey];
-                    disp = nonNegativeDisplay(v, 2);
+                    disp = formatStatCell(nonNegativeDisplay(stats[col][dataKey], 2), 2, 6);
+                } else {
+                    disp = formatStatCell('--', null, 6);
                 }
                 cells += '<td>' + disp + '</td>';
             });
@@ -2399,6 +2577,8 @@ async function populateReportPreviewDom(stored) {
     setEl('report-operated-by', operatorName || '--');
     setEl('report-employee-id', employeeId || '--');
     setEl('report-approved-by', formatApprovedByLine((stored && stored.approvedBy) || '--'));
+    var approvedEmpId = (stored && (stored.approvedByEmployeeId || stored.approvedByUsername)) || '';
+    setEl('report-approved-employee-id', approvedEmpId || '--');
     var apprPfEl = document.getElementById('report-approval-pass-fail');
     if (apprPfEl) apprPfEl.textContent = (stored && stored.approvalPassFail) ? stored.approvalPassFail : '--';
     var apprRemEl = document.getElementById('report-approval-remarks');
@@ -2408,6 +2588,10 @@ async function populateReportPreviewDom(stored) {
     }
 
     window._lastReportPreview = stored || null;
+    var ridForPrint = currentReportId != null ? currentReportId : (stored && stored.id);
+    if (ridForPrint != null && typeof buildReportPrintPayload === 'function') {
+        currentReportData = buildReportPrintPayload(stored, ridForPrint);
+    }
     if (typeof applyReportPreviewLockUi === 'function') {
         applyReportPreviewLockUi(stored);
     }
@@ -2434,6 +2618,89 @@ async function populateReportPreviewDom(stored) {
 
 function populateReportPreview(preview) {
     return populateReportPreviewDom(preview);
+}
+
+function showReportHtmlPreview() {
+    var textView = document.getElementById('report-a4-text-view');
+    var htmlView = document.getElementById('report-html-view');
+    var pre = document.getElementById('report-a4-text');
+    var container = document.getElementById('report-content');
+    if (textView) textView.style.display = 'none';
+    if (htmlView) htmlView.style.display = '';
+    if (container) container.classList.remove('report-a4-text-mode');
+    if (pre) {
+        pre.textContent = '';
+        pre.style.fontSize = '';
+        pre.style.transform = '';
+        pre.style.width = '';
+    }
+}
+
+function fitA4TextPreviewToWidth() {
+    var pre = document.getElementById('report-a4-text');
+    var container = document.getElementById('report-content');
+    var textView = document.getElementById('report-a4-text-view');
+    if (!pre || !container || !container.classList.contains('report-a4-text-mode')) return;
+    var text = pre.textContent || '';
+    if (!String(text).trim()) return;
+
+    // Available width = full white paper (minus tiny gutter). Approve panel shares the container.
+    var panel = document.getElementById('report-approve-panel');
+    var panelH = (panel && panel.style.display !== 'none' && panel.offsetParent !== null) ? (panel.offsetHeight || 0) : 0;
+    var availableW = Math.max(40, (container.clientWidth || 0) - 4);
+    if (textView) {
+        availableW = Math.max(40, (textView.clientWidth || availableW) - 2);
+    }
+
+    // Measure at a known size using an off-layout probe so scrollWidth = longest line.
+    pre.style.transform = 'none';
+    pre.style.width = 'max-content';
+    pre.style.fontSize = '10px';
+    var natural = pre.scrollWidth || 0;
+    if (natural < 10) {
+        // Fallback: assume 80-col Courier (~0.6em per char)
+        natural = 80 * 6;
+    }
+    var px = 10 * (availableW / natural);
+    // Cap only to avoid absurd sizes on empty/short content; allow large fill on kiosk.
+    px = Math.max(9, Math.min(28, px));
+    pre.style.fontSize = px.toFixed(2) + 'px';
+    pre.style.width = '100%';
+
+    // If still slightly over (scrollbar/rounding), nudge down once.
+    if (pre.scrollWidth > availableW + 1) {
+        px = Math.max(9, px * (availableW / pre.scrollWidth));
+        pre.style.fontSize = px.toFixed(2) + 'px';
+    }
+}
+
+if (typeof window !== 'undefined' && !window._a4PreviewFitResizeBound) {
+    window._a4PreviewFitResizeBound = true;
+    window.addEventListener('resize', function () {
+        if (typeof fitA4TextPreviewToWidth === 'function') fitA4TextPreviewToWidth();
+    });
+}
+
+function renderReportA4TextPreview(preview) {
+    var textView = document.getElementById('report-a4-text-view');
+    var htmlView = document.getElementById('report-html-view');
+    var pre = document.getElementById('report-a4-text');
+    var container = document.getElementById('report-content');
+    var a4Text = preview && preview.a4Text;
+    if (pre && a4Text && String(a4Text).trim()) {
+        pre.textContent = String(a4Text);
+        if (textView) textView.style.display = 'block';
+        if (htmlView) htmlView.style.display = 'none';
+        if (container) container.classList.add('report-a4-text-mode');
+        requestAnimationFrame(function () {
+            requestAnimationFrame(function () {
+                if (typeof fitA4TextPreviewToWidth === 'function') fitA4TextPreviewToWidth();
+            });
+        });
+        return true;
+    }
+    if (typeof showReportHtmlPreview === 'function') showReportHtmlPreview();
+    return false;
 }
 
 function updateReportPreviewPrintExportButtons(preview) {
@@ -2475,9 +2742,18 @@ function hideReportPreviewLoadingOverlayAfterRender() {
     });
 }
 
-/** PDF is generated server-side on approval; client stub for poll callback compatibility. */
+/** PDF is generated server-side on approval from A4 plain-text layout. */
 function _saveReportPdfSilent(reportId) {
-    return Promise.resolve(false);
+    var id = parseInt(reportId, 10);
+    if (isNaN(id) || id < 1) return Promise.resolve(false);
+    return apiRequest(API_BASE + '/api/reports/' + id + '/preview').then(function (data) {
+        var st = String((data && data.preview && data.preview.reportApprovalStatus) || '').trim().toLowerCase();
+        if (st !== 'approved' && st !== 'aborted') return false;
+        return apiRequest(API_BASE + '/api/reports/' + id + '/pdf', {
+            method: 'POST',
+            body: {}
+        });
+    }).then(function () { return true; }).catch(function () { return false; });
 }
 
 function resolveCreatedReportId(data) {
@@ -2494,9 +2770,18 @@ function openReportPreview(reportId, options) {
         window._navigatingAfterValidationCalibration = true;
         window._bypassReportPreviewRbacOnce = true;
     }
-    if (!options.setGate && !options.bypassRbac &&
-        typeof userCanViewReports === 'function' && !userCanViewReports()) {
-        if (typeof denyPermission === 'function') denyPermission('view reports');
+    var canOpen = true;
+    if (!options.setGate && !options.bypassRbac) {
+        if (typeof userCanOpenReportPreview === 'function') {
+            canOpen = userCanOpenReportPreview();
+        } else if (typeof userCanViewReports === 'function') {
+            canOpen = userCanViewReports();
+        }
+    }
+    if (!canOpen) {
+        if (typeof denyPermission === 'function') denyPermission('view report preview');
+        else if (typeof showAppModal === 'function') showAppModal('You do not have permission to open report preview.', 'Permission');
+        else alert('You do not have permission to open report preview.');
         return Promise.resolve();
     }
     if (typeof showLoadingOverlay === 'function') {
@@ -2540,9 +2825,16 @@ function openReportPreview(reportId, options) {
         } else if (typeof showAppModal === 'function') {
             showAppModal('Report preview is not available.', 'Reports');
         }
-    }).catch(function () {
+    }).catch(function (err) {
+        var msg = (err && err.message) ? String(err.message) : '';
         if (typeof showAppModal === 'function') {
-            showAppModal('Could not open report preview. Check your connection and try again from Reports.', 'Reports');
+            if (/permission|forbidden/i.test(msg)) {
+                showAppModal(msg || 'You do not have permission to open this report preview.', 'Permission');
+            } else if (msg) {
+                showAppModal('Could not open report preview: ' + msg, 'Reports');
+            } else {
+                showAppModal('Could not open report preview. Check your connection and try again from Reports.', 'Reports');
+            }
         }
     }).finally(function () {
         hideReportPreviewLoadingOverlayAfterRender();
@@ -2631,17 +2923,25 @@ async function buildPdfHtmlByIdMap(ids) {
     var out = {};
     for (var i = 0; i < ids.length; i++) {
         var rid = ids[i];
-        var stored = await fetchReportByIdForExport(rid);
-        if (!stored) {
-            alert('Could not load report ' + rid + ' for export.');
+        try {
+            var html = await buildReportPreviewHtmlById(rid);
+            if (!html || !String(html).trim()) {
+                if (typeof showAppModal === 'function') {
+                    showAppModal('Could not build PDF layout for report ' + rid + '.', 'Export');
+                } else {
+                    alert('Could not build PDF layout for report ' + rid + '.');
+                }
+                return null;
+            }
+            out[String(rid)] = html;
+        } catch (e) {
+            if (typeof showAppModal === 'function') {
+                showAppModal('Could not load report ' + rid + ' for export.', 'Export');
+            } else {
+                alert('Could not load report ' + rid + ' for export.');
+            }
             return null;
         }
-        var html = await buildReportPdfHtmlForStored(stored);
-        if (!html || !String(html).trim()) {
-            alert('Could not build PDF layout for report ' + rid + '.');
-            return null;
-        }
-        out[String(rid)] = html;
     }
     return out;
 }
@@ -2666,82 +2966,279 @@ function nonNegativeDisplay(val, decimals) {
     return n.toFixed(d);
 }
 
-async function handlePrintReport() {
-    var reportData = currentReportData;
-    if (!currentReportId) {
-        alert('No report selected to print.');
+function formatStatCell(val, decimals, width) {
+    var w = width != null ? width : 6;
+    var d = decimals != null ? decimals : 2;
+    if (val === '--' || val == null || val === '') {
+        return String('--').padStart(w, ' ');
+    }
+    if (val === 'OL') {
+        return String('OL').padStart(w, ' ');
+    }
+    var n = typeof val === 'number' ? val : parseFloat(val);
+    if (isNaN(n)) {
+        return String(val).slice(0, w).padStart(w, ' ');
+    }
+    if (d === 0) {
+        return String(Math.round(n)).padStart(w, ' ');
+    }
+    return n.toFixed(d).padStart(w, ' ');
+}
+
+function formatStatRsd(val, width) {
+    var w = width != null ? width : 6;
+    if (val === '--' || val == null || val === '') {
+        return String('--').padStart(w, ' ');
+    }
+    var n = typeof val === 'number' ? val : parseFloat(val);
+    if (isNaN(n)) {
+        return String(val).slice(0, w).padStart(w, ' ');
+    }
+    return (n.toFixed(2) + '%').padStart(w, ' ');
+}
+
+function buildReportPrintPayload(preview, reportId) {
+    if (!preview) return null;
+    var td = preview.testData || preview;
+    if (!td || typeof td !== 'object') td = {};
+    var recipe = preview.recipe || td.recipe || {};
+    return {
+        id: reportId != null ? reportId : preview.id,
+        type: preview.type || 'test',
+        testData: td,
+        recipe: recipe,
+        factorySettings: preview.factorySettings || {},
+        statistics: preview.statistics || td.statistics || {},
+        remarks: preview.remarks != null ? preview.remarks : td.remarks,
+        reportApprovalStatus: preview.reportApprovalStatus,
+        approvalPassFail: preview.approvalPassFail,
+        approvalRemarks: preview.approvalRemarks,
+        approvedBy: preview.approvedBy,
+        approvedAt: preview.approvedAt,
+        createdAt: preview.createdAt || td.createdAt,
+        completedAt: preview.completedAt || td.completedAt,
+        operatorName: preview.operatorName || td.operatorName,
+        employeeId: preview.employeeId || td.employeeId,
+        validationRuns: preview.validationRuns || td.validationRuns
+    };
+}
+
+function resolveReportDataForPrint(callback) {
+    var rid = currentReportId;
+    if (!rid) {
+        callback(null);
         return;
     }
-    if (!reportData) {
-        try {
-            var res = await fetch('/api/data/reports/' + currentReportId);
-            if (res.ok) {
-                var data = await res.json();
-                reportData = data.report || null;
-            }
-        } catch (e) {
-            console.error('Failed to load report for print:', e);
-        }
-    }
-    if (!reportData) {
-        alert('Could not load report data. Please try again.');
+    var fromPreview = typeof buildReportPrintPayload === 'function'
+        ? buildReportPrintPayload(window._lastReportPreview, rid) : null;
+    if (fromPreview && fromPreview.testData) {
+        currentReportData = fromPreview;
+        callback(fromPreview);
         return;
     }
-    try {
-        var r = await fetch('/api/print/a4', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ report_data: reportData })
-        });
-        var result = await r.json().catch(function () { return {}; });
-        if (r.ok && result.success !== false) {
-            alert('Sent to A4 printer.');
+    if (currentReportData && currentReportData.testData) {
+        callback(currentReportData);
+        return;
+    }
+    apiRequest(API_BASE + '/api/data/reports/' + rid).then(function (data) {
+        var reportData = data.report || data;
+        if (reportData) {
+            reportData.id = reportData.id != null ? reportData.id : rid;
+            currentReportData = reportData;
+            callback(reportData);
         } else {
-            alert(result.error || 'A4 print failed. Check printer connection.');
+            callback(null);
         }
-    } catch (e) {
-        console.error('A4 print error:', e);
-        alert('Print failed: ' + (e.message || 'Check printer connection.'));
+    }).catch(function () { callback(null); });
+}
+
+// ===== Report Preview HTML capture for PDF rendering =====
+var _stylesCssCache = null;
+
+function _fetchStylesCss() {
+    if (_stylesCssCache != null) return Promise.resolve(_stylesCssCache);
+    return fetch('styles.css', { cache: 'no-store' }).then(function (r) {
+        if (!r.ok) throw new Error('styles.css HTTP ' + r.status);
+        return r.text();
+    }).then(function (txt) {
+        _stylesCssCache = String(txt || '');
+        return _stylesCssCache;
+    }).catch(function () {
+        _stylesCssCache = '';
+        return '';
+    });
+}
+
+function _wrapPreviewHtmlAsDocument(innerHtml, cssText) {
+    var docCss =
+        '@page { size: A4; margin: 6mm 5mm; }' +
+        'html, body { margin: 0; padding: 0; background: #ffffff; color: #000; }' +
+        'body { font-family: Inter, "Segoe UI", Roboto, system-ui, sans-serif; }' +
+        '.modal-overlay, .sidebar, .app-header, .header-back-btn, header.app-header, ' +
+        '.test-run-controls, .report-preview-actions { display: none !important; }' +
+        '#page-report-preview, .page, .page.active { display: block !important; position: static !important; ' +
+            'background: #ffffff !important; color: #000 !important; padding: 0 !important; margin: 0 !important; ' +
+            'opacity: 1 !important; overflow: visible !important; height: auto !important; max-height: none !important; }' +
+        '#page-report-preview * { color: #000 !important; background: transparent !important; }' +
+        '#page-report-preview table { border-collapse: collapse; width: 100%; }' +
+        '#page-report-preview th, #page-report-preview td { border: 1px solid #888; padding: 4px 6px; }' +
+        '.report-preview-container.report-pdf-compact { min-height: auto !important; max-height: none !important; padding: 3mm 5mm !important; margin: 0 !important; box-shadow: none !important; font-size: 9pt !important; line-height: 1.2 !important; }' +
+        '.report-preview-container.report-pdf-compact h1 { font-size: 13pt !important; margin: 2px 0 4px !important; }' +
+        '.report-preview-container.report-pdf-compact h2 { font-size: 10pt !important; margin: 2px 0 4px !important; }' +
+        '.report-preview-container.report-pdf-compact h3 { font-size: 9.5pt !important; margin: 5px 0 2px !important; }' +
+        '.report-preview-container.report-pdf-compact table { margin: 4px 0 !important; }' +
+        '.report-preview-container.report-pdf-compact th, .report-preview-container.report-pdf-compact td { padding: 2px 4px !important; font-size: 8.5pt !important; border-width: 1px !important; }' +
+        '.report-preview-container.report-pdf-compact .report-remarks-box { min-height: 20px !important; padding: 3px 5px !important; margin: 4px 0 !important; }' +
+        '.report-preview-container.report-pdf-compact .report-approval-table { margin-top: 6px !important; }' +
+        '#report-approve-panel { display: none !important; }';
+    return (
+        '<!doctype html><html><head><meta charset="utf-8"><title>Report</title>' +
+        '<style>' + (cssText || '') + '</style>' +
+        '<style>' + docCss + '</style>' +
+        '</head><body>' + (innerHtml || '') + '</body></html>'
+    );
+}
+
+function buildReportPreviewHtmlById(reportId) {
+    var id = parseInt(reportId, 10);
+    if (isNaN(id) || id < 1) return Promise.reject(new Error('Invalid report id'));
+    return Promise.all([
+        apiRequest(API_BASE + '/api/reports/' + id + '/preview'),
+        _fetchStylesCss()
+    ]).then(function (results) {
+        var data = results[0];
+        var css = results[1];
+        if (!data || !data.preview) throw new Error('No preview for report ' + id);
+        return populateReportPreview(data.preview).then(function () {
+            var pageEl = document.getElementById('page-report-preview');
+            var containerEl = pageEl ? pageEl.querySelector('.report-preview-container') : null;
+            if (containerEl) containerEl.classList.add('report-pdf-compact');
+            var inner = pageEl ? pageEl.outerHTML : '';
+            var doc = _wrapPreviewHtmlAsDocument(inner, css);
+            if (containerEl) containerEl.classList.remove('report-pdf-compact');
+            return doc;
+        });
+    });
+}
+
+async function handlePrintReport() {
+    if (typeof userCanPrintReports === 'function' && !userCanPrintReports()) {
+        if (typeof showAppModal === 'function') {
+            showAppModal('You do not have permission to print reports.', 'Print');
+        } else {
+            alert('You do not have permission to print reports.');
+        }
+        return;
     }
+    if (typeof reportActionsBlockedForPreview === 'function' && reportActionsBlockedForPreview()) {
+        if (typeof showAppModal === 'function') {
+            showAppModal('This report must be approved before printing.', 'Print');
+        } else {
+            alert('This report must be approved before printing.');
+        }
+        return;
+    }
+    if (!currentReportId) {
+        if (typeof showAppModal === 'function') {
+            showAppModal('No report selected to print.', 'Print');
+        } else {
+            alert('No report selected to print.');
+        }
+        return;
+    }
+    resolveReportDataForPrint(function (reportData) {
+        if (!reportData) {
+            if (typeof showAppModal === 'function') {
+                showAppModal('Could not load report data. Please try again.', 'Print');
+            } else {
+                alert('Could not load report data. Please try again.');
+            }
+            return;
+        }
+        apiRequest('/api/print/a4', {
+            method: 'POST',
+            body: { report_data: reportData }
+        }).then(function (result) {
+            if (result && result.success !== false && !result.error) {
+                if (typeof showAppModal === 'function') {
+                    showAppModal('Sent to A4 printer.', 'Print');
+                } else {
+                    alert('Sent to A4 printer.');
+                }
+            } else if (typeof showAppModal === 'function') {
+                showAppModal((result && result.error) || 'A4 print failed. Check printer connection.', 'Print');
+            } else {
+                alert((result && result.error) || 'A4 print failed. Check printer connection.');
+            }
+        }).catch(function (e) {
+            var msg = 'Print failed: ' + (e && e.message ? e.message : 'Check printer connection.');
+            if (typeof showAppModal === 'function') {
+                showAppModal(msg, 'Print');
+            } else {
+                alert(msg);
+            }
+        });
+    });
 }
 
 async function handlePrintThermal() {
-    var reportData = currentReportData;
-    if (!currentReportId) {
-        alert('No report selected to print.');
-        return;
-    }
-    if (!reportData) {
-        try {
-            var res = await fetch('/api/data/reports/' + currentReportId);
-            if (res.ok) {
-                var data = await res.json();
-                reportData = data.report || null;
-            }
-        } catch (e) {
-            console.error('Failed to load report for print:', e);
-        }
-    }
-    if (!reportData) {
-        alert('Could not load report data. Please try again.');
-        return;
-    }
-    try {
-        var r = await fetch('/api/print/thermal', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ report_data: reportData })
-        });
-        var result = await r.json().catch(function () { return {}; });
-        if (r.ok && result.success !== false) {
-            alert('Sent to thermal printer.');
+    if (typeof userCanPrintReports === 'function' && !userCanPrintReports()) {
+        if (typeof showAppModal === 'function') {
+            showAppModal('You do not have permission to print reports.', 'Print');
         } else {
-            alert(result.error || 'Thermal print failed. Check printer connection.');
+            alert('You do not have permission to print reports.');
         }
-    } catch (e) {
-        console.error('Thermal print error:', e);
-        alert('Print failed: ' + (e.message || 'Check printer connection.'));
+        return;
     }
+    if (typeof reportActionsBlockedForPreview === 'function' && reportActionsBlockedForPreview()) {
+        if (typeof showAppModal === 'function') {
+            showAppModal('This report must be approved before printing.', 'Print');
+        } else {
+            alert('This report must be approved before printing.');
+        }
+        return;
+    }
+    if (!currentReportId) {
+        if (typeof showAppModal === 'function') {
+            showAppModal('No report selected to print.', 'Print');
+        } else {
+            alert('No report selected to print.');
+        }
+        return;
+    }
+    resolveReportDataForPrint(function (reportData) {
+        if (!reportData) {
+            if (typeof showAppModal === 'function') {
+                showAppModal('Could not load report data. Please try again.', 'Print');
+            } else {
+                alert('Could not load report data. Please try again.');
+            }
+            return;
+        }
+        apiRequest('/api/print/thermal', {
+            method: 'POST',
+            body: { report_data: reportData }
+        }).then(function (result) {
+            if (result && result.success !== false && !result.error) {
+                if (typeof showAppModal === 'function') {
+                    showAppModal('Sent to thermal printer.', 'Print');
+                } else {
+                    alert('Sent to thermal printer.');
+                }
+            } else if (typeof showAppModal === 'function') {
+                showAppModal((result && result.error) || 'Thermal print failed. Check printer connection.', 'Print');
+            } else {
+                alert((result && result.error) || 'Thermal print failed. Check printer connection.');
+            }
+        }).catch(function (e) {
+            var msg = 'Print failed: ' + (e && e.message ? e.message : 'Check printer connection.');
+            if (typeof showAppModal === 'function') {
+                showAppModal(msg, 'Print');
+            } else {
+                alert(msg);
+            }
+        });
+    });
 }
 
 async function handleExportReport() {
@@ -2859,9 +3356,6 @@ async function saveRecipe() {
     const parameterSamples = {};
     const labelToSamplesId = { Thickness: 'param-samples-thickness', Diameter: 'param-samples-diameter', Width: 'param-samples-width', Length: 'param-samples-length', Hardness: 'param-samples-hardness', Weight: 'param-samples-weight' };
 
-    var shapeAwareSamplesId = { Thickness: 'param-samples-thickness', Diameter: 'param-samples-diameter', Width: 'param-samples-width', Length: 'param-samples-length', Hardness: 'param-samples-hardness', Weight: 'param-samples-weight' };
-    if (currentShape === 'oblong') shapeAwareSamplesId['Length'] = 'param-samples-diameter';
-
     paramItems.forEach((item) => {
         const checkbox = item.querySelector('input[type="checkbox"]');
         const input = item.querySelector('.param-value');
@@ -2873,13 +3367,13 @@ async function saveRecipe() {
                 val = String(paramTolerances[label].nominal);
             }
             parameters[label] = val || '';
-            const samplesId = shapeAwareSamplesId[label] || labelToSamplesId[label];
+            const samplesId = (typeof resolveParamSamplesId === 'function') ? resolveParamSamplesId(label) : labelToSamplesId[label];
             if (samplesId) {
                 const samplesEl = document.getElementById(samplesId);
-                const raw = samplesEl ? (samplesEl.value || '').trim() : '';
+                const raw = samplesEl ? normalizeSamplesFieldValue(samplesEl.value) : '';
                 const totalN = Math.min(parseInt(sampleSize) || 10, 100);
                 if (raw === '') {
-                    parameterSamples[label] = 0;
+                    parameterSamples[label] = totalN;
                 } else {
                     let n = parseInt(raw, 10);
                     if (isNaN(n)) {
@@ -3592,6 +4086,22 @@ function putHardnessTestRunCheckpoint(phase, extra) {
     }
 }
 
+function handleTestReportSaveFailure(err) {
+    console.error('Failed to save test report:', err);
+    if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
+    var msg = (err && err.message) ? String(err.message) : 'Failed to save test report.';
+    if (/permission|forbidden/i.test(msg)) {
+        msg = 'Test report was not saved: your profile needs the Test access permission card.';
+    }
+    if (typeof showAppModal === 'function') showAppModal(msg, 'Test Report');
+    else alert(msg);
+    if (typeof userCanViewReports === 'function' && userCanViewReports() && typeof goToPage === 'function') {
+        goToPage('reports');
+    } else if (typeof goToPage === 'function') {
+        goToPage('home');
+    }
+}
+
 function handleTestReportSavedNavigation(reportId) {
     try {
         if (reportId != null) {
@@ -3616,6 +4126,12 @@ function handleTestReportSavedNavigation(reportId) {
 
 function startTestRun(recipe) {
     console.log("Starting test run for:", recipe);
+    if (typeof userCanRunHardwareTests === 'function' && !userCanRunHardwareTests()) {
+        var denyMsg = 'Your profile does not have Test access. Assign the Test access permission card, then log in again.';
+        if (typeof showAppModal === 'function') showAppModal(denyMsg, 'Permission');
+        else alert(denyMsg);
+        return;
+    }
     if (recipe && recipe.parameters) {
         recipe.parameters = normalizeRecipeParameters(recipe.parameters);
     }
@@ -3640,7 +4156,7 @@ function startTestRun(recipe) {
     const params = {};
     canonicalKeys.forEach(function (key) {
         var val = rawParams[key] ?? rawParams[Object.keys(rawParams).find(function (k) { return (k || '').toLowerCase() === key.toLowerCase(); })];
-        if (val != null && val !== '') {
+        if (val != null || val === '') {
             params[key] = val;
         }
     });
@@ -3648,7 +4164,7 @@ function startTestRun(recipe) {
         var c = canonicalKeys.find(function (c) { return (c || '').toLowerCase() === (k || '').toLowerCase(); });
         if (c && !(c in params)) {
             var v = rawParams[k];
-            params[c] = (v != null && v !== '') ? v : '0';
+            params[c] = (v != null || v === '') ? v : '';
         }
     });
     recipe.parameters = params;
@@ -3705,16 +4221,13 @@ function startTestRun(recipe) {
         shapeIconOblong.style.display = shape === 'oblong' ? '' : 'none';
     }
 
-    // Unit display
+    // Unit for hardness card (measurement unit strip removed)
     const fullUnit = recipe.unit || 'Newton (N)';
     const unitLower = fullUnit.toLowerCase();
     let unitShort = 'N';
     if (unitLower.includes('kgf')) unitShort = 'KGF';
     else if (unitLower.includes('strong') || unitLower.includes('cobb')) unitShort = 'SC';
     else if (!unitLower.includes('newton')) unitShort = fullUnit;
-
-    setText('run-unit-short', unitShort);
-    setText('run-unit-full', fullUnit);
 
     const distanceUnit = recipe.distanceUnit || 'mm';
     setText('run-thickness-unit', distanceUnit);
@@ -3727,24 +4240,138 @@ function startTestRun(recipe) {
         : `-- ${unitShort}`;
     setText('run-hardness-target', hardnessTargetVal);
 
-    // Total samples card
-    const sampleSize = parseInt(recipe.sampleSize) || 10;
-    setText('run-sample-count', String(sampleSize).padStart(2, '0'));
+    // Sample progress in product info bar
+    const sampleSize = typeof getEffectiveMaxSample === 'function'
+        ? getEffectiveMaxSample(recipe)
+        : (parseInt(recipe.sampleSize) || 10);
+    updateTestRunSampleProgress(0, sampleSize);
 
     updateTestRunParamCardsState(1, recipe);
+    initTestRunResultsTable(recipe);
+}
+
+function getTestRunTableColumns(recipe) {
+    var shape = ((recipe && recipe.shape) || 'round').toLowerCase();
+    var params = (recipe && recipe.parameters) || {};
+    var order = shape === 'oblong'
+        ? ['Thickness', 'Width', 'Weight', 'Length', 'Hardness']
+        : ['Thickness', 'Diameter', 'Weight', 'Hardness'];
+    return order.filter(function (p) {
+        return Object.keys(params).some(function (k) {
+            return (k || '').toLowerCase() === p.toLowerCase();
+        });
+    });
+}
+
+function initTestRunResultsTable(recipe) {
+    var head = document.getElementById('test-run-results-head');
+    var body = document.getElementById('test-run-results-body');
+    if (!head || !body) return;
+    var cols = getTestRunTableColumns(recipe);
+    window._testRunTableCols = cols;
+    head.innerHTML = '<tr><th>S.No</th>' + cols.map(function (c) {
+        return '<th>' + c + '</th>';
+    }).join('') + '</tr>';
+    var sampleSize = typeof getEffectiveMaxSample === 'function'
+        ? getEffectiveMaxSample(recipe)
+        : (parseInt(recipe.sampleSize, 10) || 10);
+    var rows = '';
+    for (var i = 1; i <= sampleSize; i++) {
+        rows += '<tr data-sample="' + i + '"><td>' + String(i).padStart(2, '0') + '</td>';
+        cols.forEach(function () { rows += '<td>--</td>'; });
+        rows += '</tr>';
+    }
+    body.innerHTML = rows;
+    setTestRunResultsActiveRow(1);
+}
+
+function setTestRunResultsActiveRow(sampleIndex) {
+    var body = document.getElementById('test-run-results-body');
+    if (!body) return;
+    body.querySelectorAll('tr[data-sample]').forEach(function (tr) {
+        var idx = parseInt(tr.getAttribute('data-sample'), 10);
+        tr.classList.toggle('active-row', idx === sampleIndex);
+    });
+}
+
+function formatTestRunTableCell(val) {
+    if (val == null || val === '') return '--';
+    if (val === 'OL' || (typeof val === 'string' && val.toUpperCase() === 'OL')) return 'OL';
+    var n = typeof val === 'number' ? val : parseFloat(val);
+    if (isNaN(n)) return String(val);
+    return n.toFixed(2);
+}
+
+function updateTestRunResultsTable(sampleIndex, paramName, value, recipe) {
+    var body = document.getElementById('test-run-results-body');
+    if (!body || sampleIndex == null) return;
+    var cols = window._testRunTableCols || getTestRunTableColumns(recipe || lastTestRunRecipe || {});
+    var row = body.querySelector('tr[data-sample="' + sampleIndex + '"]');
+    if (!row) return;
+    var colIdx = cols.findIndex(function (c) {
+        return (c || '').toLowerCase() === (paramName || '').toLowerCase();
+    });
+    if (colIdx < 0) return;
+    var cell = row.children[colIdx + 1];
+    if (cell) cell.textContent = formatTestRunTableCell(value);
+}
+
+function applyTestRunLiveHardwareLine(line) {
+    if (!testRunActive || !lastTestRunRecipe) return;
+    var recipe = lastTestRunRecipe;
+    var param = window._testRunLiveParam;
+    var fullUnit = recipe.unit || 'Newton (N)';
+    var conversionFactor = recipe.conversionFactor != null ? parseFloat(recipe.conversionFactor) : null;
+    var unitShort = 'N';
+    var lower = String(fullUnit).toLowerCase();
+    if (lower.indexOf('kgf') !== -1) unitShort = 'KGF';
+    else if (lower.indexOf('strong') !== -1 || lower.indexOf('cobb') !== -1) unitShort = 'SC';
+
+    var hardMatch = String(line).match(/D,HARD,([\d.]+)(?:,(MAX|BROK))?\s*\*/i);
+    if (hardMatch && (!param || param === 'Hardness')) {
+        var rawN = parseFloat(hardMatch[1]);
+        var el = document.getElementById('run-hardness-target');
+        if (el) {
+            if (rawN > 500) el.textContent = 'OL ' + unitShort;
+            else {
+                var hv = hardnessNewtonToUserUnit(rawN, fullUnit, conversionFactor);
+                el.textContent = (typeof hv === 'number' ? hv.toFixed(2) : String(hv)) + ' ' + unitShort;
+            }
+        }
+        return;
+    }
+
+    var dimMatch = String(line).match(/D,DIM,(-?[\d.]+)\*/i);
+    if (dimMatch && param && param !== 'Hardness' && param !== 'Weight') {
+        var rawMm = parseFloat(dimMatch[1]);
+        var parsedVal = (recipe.distanceUnit === 'inch') ? mmToInch(rawMm) : rawMm;
+        var valId = param === 'Thickness' ? 'run-thickness-val'
+            : (param === 'Width') ? 'run-width-val'
+            : 'run-lengthdia-val';
+        var elDim = document.getElementById(valId);
+        if (elDim) {
+            elDim.textContent = (typeof parsedVal === 'number' && !isNaN(parsedVal))
+                ? parsedVal.toFixed(2)
+                : '--';
+        }
+    }
 }
 
 function updateTestRunSampleProgress(currentIndex, totalSamples) {
-    const el = document.getElementById('run-sample-count');
+    const el = document.getElementById('run-sample-progress') || document.getElementById('run-sample-count');
+    const labelEl = document.getElementById('run-sample-label');
     if (!el) return;
     const total = parseInt(totalSamples) || 0;
     const current = parseInt(currentIndex) || 0;
+    if (labelEl) {
+        labelEl.textContent = (current > 0 && current <= total) ? 'Sample:' : 'Samples:';
+    }
     if (total <= 0) {
         el.textContent = '--';
     } else if (current > 0 && current <= total) {
         el.textContent = current + ' / ' + total;
     } else {
-        el.textContent = String(total).padStart(2, '0');
+        el.textContent = String(total);
     }
 }
 
@@ -3781,8 +4408,14 @@ function clearTestRunDisplay() {
         var el = document.getElementById(id);
         if (el) el.textContent = '--';
     });
-    var sampleEl = document.getElementById('run-sample-count');
+    var sampleEl = document.getElementById('run-sample-progress') || document.getElementById('run-sample-count');
     if (sampleEl) sampleEl.textContent = '--';
+    var sampleLabel = document.getElementById('run-sample-label');
+    if (sampleLabel) sampleLabel.textContent = 'Samples:';
+    var resultsBody = document.getElementById('test-run-results-body');
+    if (resultsBody) resultsBody.innerHTML = '';
+    var resultsHead = document.getElementById('test-run-results-head');
+    if (resultsHead) resultsHead.innerHTML = '';
 }
 
 // Normalize parameter keys to capitalized (Thickness, Diameter, etc.) for consistent use
@@ -3796,7 +4429,7 @@ function normalizeRecipeParameters(parameters) {
             if (c.toLowerCase() === (k || '').toLowerCase()) { key = c; break; }
         }
         var v = parameters[k];
-        if (v != null && (v !== '' || v === 0 || (typeof v === 'number' && !isNaN(v)))) out[key] = v;
+        if (v != null || v === '') out[key] = v;
     });
     return out;
 }
@@ -3807,17 +4440,13 @@ function getOrderedParamsForTest(recipe) {
     var shape = (recipe.shape || 'round').toLowerCase();
     var order = ['Thickness', 'Width', 'Weight', 'Length', 'Hardness'];
     if (shape !== 'oblong') order = ['Thickness', 'Diameter', 'Weight', 'Hardness'];
-    // Case-insensitive key match; treat numeric 0 and numeric values as present
+    // Case-insensitive key match; selected parameters may intentionally have blank nominal values.
     return order.filter(function (p) {
         var key = Object.keys(params).find(function (k) { return (k || '').toLowerCase() === p.toLowerCase(); });
-        if (key == null) return false;
-        var v = params[key];
-        if (v !== '' && (v != null || v === 0) && (typeof v === 'number' ? !isNaN(v) : true)) {
-            // Exclude parameters with 0 sample size; if no per-param samples, include (backward compat)
-            if (!Object.prototype.hasOwnProperty.call(ps, p)) return true;
-            return (parseInt(ps[p], 10) || 0) > 0;
-        }
-        return false;
+        var sampleKey = Object.keys(ps).find(function (k) { return (k || '').toLowerCase() === p.toLowerCase(); });
+        if (key == null && sampleKey == null) return false;
+        if (sampleKey == null) return true;
+        return (parseInt(ps[sampleKey], 10) || 0) > 0;
     });
 }
 
@@ -3883,6 +4512,8 @@ async function runHardnessTestLoop() {
         return;
     }
     var sampleSize = parseInt(recipe.sampleSize) || 10;
+    var effectiveMaxSample = typeof getEffectiveMaxSample === 'function' ? getEffectiveMaxSample(recipe) : sampleSize;
+    if (effectiveMaxSample < 1) effectiveMaxSample = sampleSize;
     var mode = recipe.mode || 'auto';
     var delaySeconds = 2; // Default delay
     if (mode === 'auto') {
@@ -3936,16 +4567,24 @@ async function runHardnessTestLoop() {
         el.textContent = (typeof val === 'number' ? val.toFixed(2) : String(val)) + ' ' + unitShort;
     };
 
-    testRunTotalSamples = sampleSize;
+    testRunTotalSamples = effectiveMaxSample;
     testRunStartTime = Date.now();
     var firstEspCommandDone = false;
+    var samplesAttempted = 0;
 
-    for (var s = 1; s <= sampleSize; s++) {
+    for (var s = 1; s <= effectiveMaxSample; s++) {
         if (testRunAborted) break;
 
+        var paramsToMeasure = getParametersForSample(s, recipe);
+        if (!paramsToMeasure || paramsToMeasure.length === 0) {
+            break;
+        }
+
+        samplesAttempted = s;
         testRunCurrentSample = s;
-        updateTestRunSampleProgress(s, sampleSize);
+        updateTestRunSampleProgress(s, effectiveMaxSample);
         updateTestRunParamCardsState(s, recipe);
+        setTestRunResultsActiveRow(s);
         setDimEl('run-thickness-val', null);
         setDimEl('run-lengthdia-val', null);
         setDimEl('run-width-val', null);
@@ -3957,13 +4596,13 @@ async function runHardnessTestLoop() {
             if (el) { el.textContent = '--'; el.removeAttribute('data-status'); }
         });
 
-        var paramsToMeasure = getParametersForSample(s, recipe);
         for (var pi = 0; pi < paramsToMeasure.length; pi++) {
             if (testRunAborted) break;
             var paramName = paramsToMeasure[pi];
             var isHardness = paramName === 'Hardness';
-            var nominal = parseFloat(params[paramName]) || 0;
-            var toleranceConfig = tolerances[paramName] || null;
+            window._testRunLiveParam = paramName;
+            var toleranceConfig = getToleranceForParam(tolerances, paramName);
+            var nominal = getParamNominalForTolerance(paramName, params, tolerances);
 
             try {
                 var data;
@@ -3980,6 +4619,7 @@ async function runHardnessTestLoop() {
                     if (measurements.Weight) measurements.Weight.push(parsedVal);
                     var runWeightEl = document.getElementById('run-weight-val');
                     if (runWeightEl) runWeightEl.textContent = typeof parsedVal === 'number' && !isNaN(parsedVal) ? parsedVal.toFixed(2) : String(parsedVal);
+                    updateTestRunResultsTable(s, paramName, parsedVal, recipe);
                 } else if (isHardness) {
                     if (testRunAborted) break;
                     data = await apiRequest('/api/hardware/test/hardness', { method: 'POST' });
@@ -3992,10 +4632,12 @@ async function runHardnessTestLoop() {
                             isOL = true;
                             setHardnessEl('OL');
                             measurements.Hardness.push('OL');
+                            updateTestRunResultsTable(s, paramName, 'OL', recipe);
                         } else {
                             parsedVal = hardnessNewtonToUserUnit(rawN, fullUnit, conversionFactor);
                             setHardnessEl(parsedVal);
                             if (parsedVal != null) measurements.Hardness.push(parsedVal);
+                            updateTestRunResultsTable(s, paramName, parsedVal, recipe);
                         }
                     } else {
                         setHardnessEl(null);
@@ -4014,10 +4656,13 @@ async function runHardnessTestLoop() {
                     if (paramName === 'Thickness') setDimEl('run-thickness-val', parsedVal);
                     else if (paramName === 'Diameter' || paramName === 'Length') setDimEl('run-lengthdia-val', parsedVal);
                     else if (paramName === 'Width') setDimEl('run-width-val', parsedVal);
+                    if (parsedVal != null) updateTestRunResultsTable(s, paramName, parsedVal, recipe);
                 }
 
                 var isQuickTestRun = (typeof currentTest !== 'undefined' && currentTest === 'quick');
-                var shouldCheckTolerance = parsedVal != null && toleranceConfig && typeof checkMeasurementAndShowFailureModalIfNeeded === 'function' && !isQuickTestRun;
+                var shouldCheckTolerance = parsedVal != null && toleranceConfig &&
+                    typeof checkMeasurementAndShowFailureModalIfNeeded === 'function' &&
+                    !isQuickTestRun && !isNaN(nominal);
                 
                 // Ensure Weight tolerance check happens - verify toleranceConfig exists
                 if (paramName === 'Weight' && parsedVal != null && !toleranceConfig) {
@@ -4062,18 +4707,26 @@ async function runHardnessTestLoop() {
             } catch (e) {
                 console.error('Test failed for ' + paramName + ':', e);
                 var msg = (e.message || 'Unknown error') + '';
-                var friendlyMsg = msg.toLowerCase().indexOf('timeout') !== -1
-                    ? 'Equipment did not respond within 30 seconds. Please check the device and try again.'
-                    : ('Test failed: ' + msg);
-                alert(friendlyMsg);
+                var friendlyMsg;
+                if (/permission|forbidden/i.test(msg)) {
+                    friendlyMsg = 'Cannot run this test: your profile needs the Test access permission card (Quick test / Load recipe).';
+                } else if (msg.toLowerCase().indexOf('timeout') !== -1) {
+                    friendlyMsg = 'Equipment did not respond within 45 seconds. Please check the device and try again.';
+                } else {
+                    friendlyMsg = 'Test failed: ' + msg;
+                }
+                if (typeof showAppModal === 'function') showAppModal(friendlyMsg, 'Test');
+                else alert(friendlyMsg);
                 testRunAborted = true;
                 break;
             }
 
             if (testRunAborted) break;
 
+            window._testRunLiveParam = null;
+
             // Skip wait when last parameter of last sample is done - navigate immediately
-            var isLastParamOfLastSample = (s === sampleSize && pi === paramsToMeasure.length - 1);
+            var isLastParamOfLastSample = (s === effectiveMaxSample && pi === paramsToMeasure.length - 1);
             if (!isLastParamOfLastSample) {
                 if (mode === 'manual') {
                     testRunManualWaitingForStart = true;
@@ -4104,7 +4757,7 @@ async function runHardnessTestLoop() {
         btnAction.className = 'btn-ctrl start header-btn';
         btnAction.innerHTML = '<div class="ctrl-icon">▶</div><span>START</span>';
     }
-    var total = lastTestRunRecipe ? (parseInt(lastTestRunRecipe.sampleSize) || 10) : 10;
+    var total = effectiveMaxSample || (lastTestRunRecipe ? (parseInt(lastTestRunRecipe.sampleSize) || 10) : 10);
     updateTestRunSampleProgress(0, total);
 
     var statistics = {};
@@ -4120,6 +4773,13 @@ async function runHardnessTestLoop() {
         return;
     }
 
+    var reportSampleSize = samplesAttempted > 0 ? samplesAttempted : effectiveMaxSample;
+    var maxMeasLen = 0;
+    ['Thickness', 'Diameter', 'Width', 'Length', 'Hardness', 'Weight'].forEach(function (key) {
+        if (measurements[key] && measurements[key].length > maxMeasLen) maxMeasLen = measurements[key].length;
+    });
+    if (maxMeasLen > reportSampleSize) reportSampleSize = maxMeasLen;
+
     if (lastTestRunRecipe && typeof saveReport === 'function') {
         var r = lastTestRunRecipe;
         saveReport({
@@ -4132,7 +4792,7 @@ async function runHardnessTestLoop() {
             parameterSamples: r.parameterSamples || {},
             unit: r.unit,
             conversionFactor: r.conversionFactor,
-            sampleSize: r.sampleSize,
+            sampleSize: reportSampleSize,
             mode: r.mode || 'auto',
             status: testRunAborted ? 'aborted' : 'Completed',
             measurements: measurements,
@@ -4143,15 +4803,14 @@ async function runHardnessTestLoop() {
             isQuickTest: (typeof currentTest !== 'undefined' && currentTest === 'quick'),
             testStartTime: testRunStartTime ? new Date(testRunStartTime).toISOString() : undefined,
             testEndTime: new Date().toISOString(),
-            durationSeconds: testRunStartTime ? Math.floor((Date.now() - testRunStartTime) / 1000) : undefined
+            durationSeconds: testRunStartTime ? Math.floor((Date.now() - testRunStartTime) / 1000) : undefined,
+            recipe: Object.assign({}, r, { sampleSize: reportSampleSize })
         }).then(function (reportId) {
             if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
             fetch('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
             handleTestReportSavedNavigation(reportId);
         }).catch(function (err) {
-            console.error('Failed to save test report:', err);
-            if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
-            if (typeof goToPage === 'function') goToPage('reports');
+            handleTestReportSaveFailure(err);
         });
     } else {
         if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
@@ -4234,9 +4893,7 @@ function toggleTestRunState() {
                     fetch('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
                     handleTestReportSavedNavigation(reportId);
                 }).catch(function (err) {
-                    console.error('Failed to save test report:', err);
-                    if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
-                    if (typeof goToPage === 'function') goToPage('reports');
+                    handleTestReportSaveFailure(err);
                 });
             } else {
                 if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
@@ -4413,9 +5070,7 @@ function handleSampleFailureEndTest() {
             fetch('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
             handleTestReportSavedNavigation(reportId);
         }).catch(function (err) {
-            console.error('Failed to save test report:', err);
-            if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
-            if (typeof goToPage === 'function') goToPage('reports');
+            handleTestReportSaveFailure(err);
         });
     } else {
         // If no recipe, still navigate to reports
@@ -4428,6 +5083,51 @@ function handleSampleFailureEndTest() {
         btnAction.className = 'btn-ctrl start header-btn';
         btnAction.innerHTML = '<div class="ctrl-icon">▶</div><span>START</span>';
     }
+}
+
+/**
+ * Case-insensitive tolerance lookup for a parameter name.
+ */
+function getToleranceForParam(tolerances, paramName) {
+    if (!tolerances || !paramName) return null;
+    if (tolerances[paramName]) return tolerances[paramName];
+    var key = Object.keys(tolerances).find(function (k) {
+        return (k || '').toLowerCase() === String(paramName || '').toLowerCase();
+    });
+    return key ? tolerances[key] : null;
+}
+
+/**
+ * Nominal for T1/T2 checks: parameters first, then tolerance modal nominal from recipe creation.
+ */
+function getParamNominalForTolerance(paramName, params, tolerances) {
+    params = params || {};
+    tolerances = tolerances || {};
+    var raw = params[paramName];
+    if (raw == null || raw === '') {
+        var pKey = Object.keys(params).find(function (k) {
+            return (k || '').toLowerCase() === String(paramName || '').toLowerCase();
+        });
+        raw = pKey != null ? params[pKey] : null;
+    }
+    if (raw != null && raw !== '') {
+        var n = parseFloat(raw);
+        if (!isNaN(n)) return n;
+    }
+    if (paramName === 'Diameter' && params.Length != null && params.Length !== '') {
+        var nLen = parseFloat(params.Length);
+        if (!isNaN(nLen)) return nLen;
+    }
+    if (paramName === 'Length' && params.Diameter != null && params.Diameter !== '') {
+        var nDia = parseFloat(params.Diameter);
+        if (!isNaN(nDia)) return nDia;
+    }
+    var tol = getToleranceForParam(tolerances, paramName);
+    if (tol && tol.nominal != null && tol.nominal !== '') {
+        var tn = parseFloat(tol.nominal);
+        if (!isNaN(tn)) return tn;
+    }
+    return NaN;
 }
 
 /**
@@ -4594,13 +5294,13 @@ async function nextFormStep() {
             alert('Please enter Sample Size (1-100).');
             return;
         }
-        const labelToSamplesIdStep = { Thickness: 'param-samples-thickness', Diameter: 'param-samples-diameter', Width: 'param-samples-width', Length: 'param-samples-length', Hardness: 'param-samples-hardness', Weight: 'param-samples-weight' };
         let paramSampleExceedsTotal = false;
         document.querySelectorAll('.parameter-item').forEach((item) => {
             const checkbox = item.querySelector('input[type="checkbox"]');
             const label = item.querySelector('.checkbox-label span')?.textContent || '';
-            if (checkbox?.checked && label && labelToSamplesIdStep[label]) {
-                const samplesEl = document.getElementById(labelToSamplesIdStep[label]);
+            const samplesId = (typeof resolveParamSamplesId === 'function') ? resolveParamSamplesId(label) : null;
+            if (checkbox?.checked && label && samplesId) {
+                const samplesEl = document.getElementById(samplesId);
                 const paramSamples = samplesEl ? parseInt(samplesEl.value, 10) : 0;
                 if (!isNaN(paramSamples) && paramSamples > sampleNum) {
                     paramSampleExceedsTotal = true;
@@ -4615,8 +5315,9 @@ async function nextFormStep() {
         document.querySelectorAll('.parameter-item').forEach((item) => {
             const checkbox = item.querySelector('input[type="checkbox"]');
             const label = item.querySelector('.checkbox-label span')?.textContent || '';
-            if (checkbox?.checked && label && labelToSamplesIdStep[label]) {
-                const samplesEl = document.getElementById(labelToSamplesIdStep[label]);
+            const samplesId = (typeof resolveParamSamplesId === 'function') ? resolveParamSamplesId(label) : null;
+            if (checkbox?.checked && label && samplesId) {
+                const samplesEl = document.getElementById(samplesId);
                 const paramSamples = samplesEl ? parseInt(samplesEl.value, 10) : 0;
                 if (!isNaN(paramSamples) && paramSamples === sampleNum) atLeastOneEqualsTotal = true;
             }
@@ -5178,126 +5879,6 @@ function closeGenericModal() {
     }
 }
 
-function initFactorySupportPage() {
-    const loadingEl = document.getElementById('factory-support-loading-msg');
-    const userEl = document.getElementById('factory-support-user');
-    const passEl = document.getElementById('factory-support-password');
-    const btnBack = document.getElementById('factory-support-btn-back');
-    const btnSubmit = document.getElementById('factory-support-btn-submit');
-    if (loadingEl) loadingEl.style.display = 'none';
-    if (userEl) {
-        userEl.value = '';
-        userEl.disabled = false;
-    }
-    if (passEl) {
-        passEl.value = '';
-        passEl.disabled = false;
-    }
-    if (btnBack) btnBack.disabled = false;
-    if (btnSubmit) btnSubmit.disabled = false;
-}
-
-function initFactorySupportResultPage() {
-    const el = document.getElementById('factory-support-result-ip');
-    if (!el) return;
-    let raw = '';
-    try {
-        raw = sessionStorage.getItem('factorySupportResultIp') || '';
-    } catch (e) {
-        raw = '';
-    }
-    el.textContent = raw.trim()
-        ? raw.trim()
-        : 'No address is available. Go back, check the LAN connection, and sign in again.';
-}
-
-function factorySupportVerifyFetch(username, password) {
-    return fetch('/api/support/factory/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: username, password: password })
-    }).then(function (response) {
-        return response.text().then(function (text) {
-            let data = null;
-            const t = (text || '').trim();
-            if (t.startsWith('{') || t.startsWith('[')) {
-                try {
-                    data = JSON.parse(t);
-                } catch (e) {
-                    data = null;
-                }
-            }
-            if (!response.ok) {
-                const msg =
-                    data && data.error ? data.error : t || 'HTTP ' + response.status;
-                throw new Error(msg);
-            }
-            if (!data || typeof data !== 'object') {
-                throw new Error('Invalid response from server');
-            }
-            return data;
-        });
-    });
-}
-
-function submitFactorySupportLogin() {
-    const userEl = document.getElementById('factory-support-user');
-    const passEl = document.getElementById('factory-support-password');
-    const loadingEl = document.getElementById('factory-support-loading-msg');
-    const btnBack = document.getElementById('factory-support-btn-back');
-    const btnSubmit = document.getElementById('factory-support-btn-submit');
-    const username = userEl ? userEl.value.trim() : '';
-    const password = passEl ? passEl.value : '';
-    if (!username || !password) {
-        alert('Please enter factory support ID and password.');
-        return;
-    }
-    const start = Date.now();
-    if (loadingEl) loadingEl.style.display = 'block';
-    if (btnBack) btnBack.disabled = true;
-    if (btnSubmit) btnSubmit.disabled = true;
-    if (userEl) userEl.disabled = true;
-    if (passEl) passEl.disabled = true;
-
-    const restoreForm = function () {
-        if (loadingEl) loadingEl.style.display = 'none';
-        if (btnBack) btnBack.disabled = false;
-        if (btnSubmit) btnSubmit.disabled = false;
-        if (userEl) userEl.disabled = false;
-        if (passEl) passEl.disabled = false;
-    };
-
-    factorySupportVerifyFetch(username, password)
-        .then(function (res) {
-            const minMs = 1200;
-            const elapsed = Date.now() - start;
-            const wait = Math.max(0, minMs - elapsed);
-            return new Promise(function (resolve) {
-                setTimeout(function () {
-                    resolve(res);
-                }, wait);
-            });
-        })
-        .then(function (res) {
-            if (res && res.ok) {
-                const text =
-                    res.addresses && String(res.addresses).trim()
-                        ? String(res.addresses).trim()
-                        : 'No IP address found. Check that this device is connected to the LAN.';
-                try {
-                    sessionStorage.setItem('factorySupportResultIp', text);
-                } catch (e) {}
-                goToPage('factory-support-result');
-            } else {
-                throw new Error('Sign-in was not successful.');
-            }
-        })
-        .catch(function (e) {
-            restoreForm();
-            alert(e.message || 'Sign-in failed');
-        });
-}
-
 function showFactoryResetConfirm() {
     showModal(
         'Factory Reset',
@@ -5472,7 +6053,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // Function to attach keyboard to all text inputs
     function attachKeyboardToInputs() {
         // Updated selector to exclude select elements
-        const inputs = document.querySelectorAll('input[type="text"], input[type="number"], .input-field:not(select), .param-value:not(select)');
+        const inputs = document.querySelectorAll('input[type="text"], input[type="number"], .input-field:not(select), .param-value:not(select), #param-samples-modal-input, #backoff-modal-input, #delay-modal-input');
         inputs.forEach(input => {
             // Remove existing listeners to avoid duplicates
             input.removeEventListener('focus', input._keyboardFocusHandler);
@@ -5527,31 +6108,60 @@ document.addEventListener('DOMContentLoaded', function () {
 // ===== PARAMETER SAMPLES & TOLERANCE MODAL =====
 const labelToSamplesId = { Thickness: 'param-samples-thickness', Diameter: 'param-samples-diameter', Width: 'param-samples-width', Length: 'param-samples-length', Hardness: 'param-samples-hardness', Weight: 'param-samples-weight' };
 
+function resolveParamSamplesId(paramLabel) {
+    var label = String(paramLabel || '').trim();
+    if (!label) return null;
+    if (typeof currentShape !== 'undefined' && currentShape === 'oblong' && (label === 'Length' || label === 'Diameter')) {
+        return 'param-samples-diameter';
+    }
+    return labelToSamplesId[label] || null;
+}
+
+function normalizeSamplesFieldValue(raw) {
+    var s = String(raw == null ? '' : raw).trim();
+    return s === '0' ? '' : s;
+}
+
+function focusInputWithOSK(inputEl) {
+    if (!inputEl) return;
+    setTimeout(function () {
+        try {
+            inputEl.focus();
+            if (typeof window.openOSKForInput === 'function') {
+                window.openOSKForInput(inputEl);
+            }
+        } catch (e) {
+            console.warn('[OSK] focus failed:', e);
+        }
+    }, 80);
+}
+
 // Handle checkbox change event - trigger popup flow when checkbox is checked
 function handleParameterCheckboxChange(paramLabel, checkboxElement) {
     if (checkboxElement.checked === true) {
         openParamConfigModal(paramLabel);
     } else {
-        var samplesId = labelToSamplesId[paramLabel];
-        if (currentShape === 'oblong' && paramLabel === 'Length') samplesId = 'param-samples-diameter';
+        var samplesId = resolveParamSamplesId(paramLabel);
         if (samplesId) {
             const samplesEl = document.getElementById(samplesId);
-            if (samplesEl) samplesEl.value = '0';
+            if (samplesEl) samplesEl.value = '';
         }
     }
 }
 
 function openParamConfigModal(paramLabel) {
     currentParamConfig = paramLabel;
-    var samplesId = labelToSamplesId[paramLabel];
-    if (currentShape === 'oblong' && paramLabel === 'Length') samplesId = 'param-samples-diameter';
-    const samplesEl = document.getElementById(samplesId);
+    var samplesId = resolveParamSamplesId(paramLabel);
+    const samplesEl = samplesId ? document.getElementById(samplesId) : null;
     const modalInput = document.getElementById('param-samples-modal-input');
     const modalTitle = document.getElementById('param-samples-modal-title');
     const modal = document.getElementById('param-samples-modal');
     if (modalTitle) modalTitle.textContent = 'Samples for ' + paramLabel;
-    if (modalInput && samplesEl) modalInput.value = samplesEl.value || '';
+    if (modalInput) {
+        modalInput.value = samplesEl ? normalizeSamplesFieldValue(samplesEl.value) : '';
+    }
     if (modal) modal.style.display = 'flex';
+    focusInputWithOSK(modalInput);
 }
 
 function closeParamSamplesModal() {
@@ -5579,8 +6189,8 @@ function confirmParamSamples() {
         alert('The parameter sample cannot be more than the total sample size (' + maxSamples + ').');
         return;
     }
-    const samplesId = labelToSamplesId[currentParamConfig];
-    const samplesEl = document.getElementById(samplesId);
+    const samplesId = resolveParamSamplesId(currentParamConfig);
+    const samplesEl = samplesId ? document.getElementById(samplesId) : null;
     if (samplesEl) samplesEl.value = val;
     closeParamSamplesModal();
     if (currentTest === 'quick') {
@@ -5777,6 +6387,18 @@ function confirmParamTolerance() {
             nominal,
             plausibility
         };
+        // Keep parameter nominal field in sync with tolerance page (used on test run cards)
+        var paramValueMap = {
+            'Thickness': 'thickness-value',
+            'Diameter': 'diameter-value',
+            'Width': 'width-value',
+            'Length': 'length-value',
+            'Hardness': 'hardness-value',
+            'Weight': 'weight-value'
+        };
+        var paramValueId = paramValueMap[currentParamConfig];
+        var paramValueEl = paramValueId ? document.getElementById(paramValueId) : null;
+        if (paramValueEl && nominal) paramValueEl.value = String(nominal);
     }
     closeParamToleranceModal();
 }
@@ -5987,6 +6609,7 @@ async function initFactorySettings() {
         const maxUsersEl = document.getElementById('factory-max-users');
         const maxAdminsEl = document.getElementById('factory-max-admins');
         const maxSupervisorsEl = document.getElementById('factory-max-supervisors');
+        const maxQaEl = document.getElementById('factory-max-qa');
 
         if (companyNameEl) companyNameEl.value = settings.companyName || '';
         if (companyLocationEl) companyLocationEl.value = settings.companyLocation || '';
@@ -5994,7 +6617,7 @@ async function initFactorySettings() {
         if (modelNoEl) modelNoEl.value = settings.modelNo || '';
         if (instrumentIdEl) instrumentIdEl.value = settings.instrumentId || '';
         if (installationDateEl) installationDateEl.value = settings.installationDate || '';
-        if (firmwareEl) firmwareEl.value = 'RD-RDT v1.0.0';
+        if (firmwareEl) firmwareEl.value = 'RD-THT v1.0.0';
         if (installedByEl) installedByEl.value = settings.installedBy || '';
         if (loadCellRangeEl) loadCellRangeEl.value = String(settings.loadCellRange || 500);
         var pwdDaysEl = document.getElementById('factory-password-reset-days');
@@ -6009,6 +6632,7 @@ async function initFactorySettings() {
         if (maxUsersEl) maxUsersEl.value = String(settings.maxUsers || 10);
         if (maxAdminsEl) maxAdminsEl.value = String(settings.maxAdmins || 2);
         if (maxSupervisorsEl) maxSupervisorsEl.value = String(settings.maxSupervisors || 3);
+        if (maxQaEl) maxQaEl.value = String(settings.maxQa != null ? settings.maxQa : 3);
 
         console.log('[Factory Settings] Initialized with settings:', settings);
     } catch (e) {
@@ -6019,10 +6643,12 @@ async function initFactorySettings() {
 async function saveFactorySettings() {
     console.log('[Factory Settings] Save button clicked');
     
-    // Check RBAC permission
-    if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
-        const role = getCurrentRole();
-        if (!canPerformAction(role, 'factory-settings', 'save')) {
+    // Check RBAC permission (prefer full user object so Factory username is recognized)
+    if (typeof canPerformAction === 'function') {
+        const roleOrUser = (typeof window !== 'undefined' && window.currentUser)
+            ? window.currentUser
+            : (typeof getCurrentRole === 'function' ? getCurrentRole() : null);
+        if (!canPerformAction(roleOrUser, 'factory-settings', 'save')) {
             alert('You do not have permission to save factory settings.');
             return;
         }
@@ -6043,6 +6669,7 @@ async function saveFactorySettings() {
         const maxUsersEl = document.getElementById('factory-max-users');
         const maxAdminsEl = document.getElementById('factory-max-admins');
         const maxSupervisorsEl = document.getElementById('factory-max-supervisors');
+        const maxQaEl = document.getElementById('factory-max-qa');
 
         const companyName = companyNameEl && companyNameEl.value ? companyNameEl.value.trim() : '';
         const companyLocation = companyLocationEl && companyLocationEl.value ? companyLocationEl.value.trim() : '';
@@ -6057,6 +6684,7 @@ async function saveFactorySettings() {
         const maxUsers = Math.max(1, Math.min(999, parseInt(maxUsersEl?.value || 10, 10)));
         const maxAdmins = Math.max(1, Math.min(99, parseInt(maxAdminsEl?.value || 2, 10)));
         const maxSupervisors = Math.max(1, Math.min(99, parseInt(maxSupervisorsEl?.value || 3, 10)));
+        const maxQa = Math.max(1, Math.min(99, parseInt(maxQaEl?.value || 3, 10)));
         const passwordResetPeriodDays = Math.max(1, Math.min(3650, parseInt((document.getElementById('factory-password-reset-days') || {}).value || 30, 10) || 30));
         const autoLogoutMinutes = Math.max(0, Math.min(10080, parseInt((document.getElementById('factory-auto-logout-minutes') || {}).value || '0', 10) || 0));
         const biometricEnabled = ((document.getElementById('factory-biometric-enabled') || {}).value || 'enabled') !== 'disabled';
@@ -6093,23 +6721,30 @@ async function saveFactorySettings() {
                         maxUsers,
                         maxAdmins,
                         maxSupervisors,
+                        maxQa,
                         passwordResetPeriodDays,
                         autoLogoutMinutes,
                         biometricEnabled
                     };  
 
-                    await apiRequest('/api/data/factory-settings', {
+                    var saveResult = await apiRequest('/api/data/factory-settings', {
                         method: 'POST',
                         body: JSON.stringify(data)
                     });
+                    if (saveResult && saveResult.settings) {
+                        data.maxQa = saveResult.settings.maxQa != null ? saveResult.settings.maxQa : data.maxQa;
+                    }
 
                     try {
-                        localStorage.setItem('factorySettings', JSON.stringify(data));
+                        localStorage.setItem('factorySettings', JSON.stringify(saveResult && saveResult.settings ? saveResult.settings : data));
                     } catch (e) {
                         console.warn('Failed to save factory settings to localStorage:', e);
                     }
 
                     await updateFactorySettingsDisplays();
+                    if (typeof initFactorySettings === 'function') {
+                        try { await initFactorySettings(); } catch (e) { /* ignore */ }
+                    }
 
                     alert('Factory settings saved successfully');
                     _navigatingAfterSave = true;
@@ -6119,7 +6754,7 @@ async function saveFactorySettings() {
 
                 } catch (e) {
                     console.error('[Factory Settings] Error saving factory settings:', e);
-                    alert('Failed to save factory settings');
+                    alert('Failed to save factory settings: ' + (e && e.message ? e.message : 'Unknown error'));
                 }
             },
             true,   
@@ -6127,7 +6762,7 @@ async function saveFactorySettings() {
         );
     } catch (e) {
         console.error('[Factory Settings] Error saving factory settings:', e);
-        alert('Failed to save factory settings');
+        alert('Failed to save factory settings: ' + (e && e.message ? e.message : 'Unknown error'));
     }
 }
 
@@ -6286,8 +6921,6 @@ function updateSettingsVisibility() {
     }
     var factoryCard = document.querySelector('.settings-factory');
     if (factoryCard) factoryCard.style.display = rl === 'factory' ? '' : 'none';
-    var factorySupportCard = document.querySelector('.settings-factory-support');
-    if (factorySupportCard) factorySupportCard.style.display = rl === 'factory' ? '' : 'none';
     var resetCard = document.querySelector('.settings-reset');
     if (resetCard) resetCard.style.display = rl === 'factory' ? '' : 'none';
     var ipCard = document.querySelector('.settings-ip-configure');

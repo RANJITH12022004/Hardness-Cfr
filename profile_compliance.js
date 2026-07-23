@@ -741,6 +741,29 @@ function userCanViewReports(userObj) {
     return typeof canAccess === 'function' && canAccess(u, 'reports-view');
 }
 
+/** Open a report preview (post-test/validation or Reports list). Matches server preview gate. */
+function userCanOpenReportPreview(userObj) {
+    var u = userObj || window.currentUser;
+    if (!u) return false;
+    if (isFactorySessionUser(u)) return true;
+    if (typeof canAccess !== 'function') return false;
+    if (canAccess(u, 'reports-view')) return true;
+    if (canAccess(u, 'quick-test') || canAccess(u, 'recipe-test')) return true;
+    if (canAccess(u, 'validation-test') || canAccess(u, 'calibration-menu')) return true;
+    if (canAccess(u, 'test-report-approve') || canAccess(u, 'validation-report-approve')) return true;
+    if (canAccess(u, 'calibration-report-approve')) return true;
+    return false;
+}
+
+/** True when the session may run hardness/dimension hardware tests. */
+function userCanRunHardwareTests(userObj) {
+    var u = userObj || window.currentUser;
+    if (!u) return false;
+    if (isFactorySessionUser(u)) return true;
+    if (typeof canAccess !== 'function') return false;
+    return canAccess(u, 'quick-test') || canAccess(u, 'recipe-test');
+}
+
 function userCanPrintReports(userObj) {
     var u = userObj || window.currentUser;
     if (!u) return false;

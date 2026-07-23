@@ -552,7 +552,7 @@ function guardReportPreviewNavigation(targetPage) {
     if (!active || active.id !== 'page-report-preview') {
         var rid = (typeof currentReportId !== 'undefined' ? currentReportId : null) ||
             (window._reportApprovalGate && window._reportApprovalGate.reportId);
-        if (rid && typeof openReportPreview === 'function') openReportPreview(rid);
+        if (rid && typeof openReportPreview === 'function') openReportPreview(rid, { bypassRbac: true });
     } else {
         if (typeof scrollReportApprovePanelIntoView === 'function') scrollReportApprovePanelIntoView();
         if (typeof scrollReportPendingBannerIntoView === 'function') scrollReportPendingBannerIntoView();
@@ -614,7 +614,7 @@ function reapplyReportPreviewLockIfNeeded() {
         if (typeof startReportApprovalPollIfLocked === 'function') startReportApprovalPollIfLocked();
         var active = document.querySelector('.page.active');
         if (!active || active.id !== 'page-report-preview') {
-            if (typeof openReportPreview === 'function') openReportPreview(rid);
+            if (typeof openReportPreview === 'function') openReportPreview(rid, { setGate: true, bypassRbac: true });
         }
     }).catch(function () {});
 }
@@ -649,9 +649,42 @@ function startReportApprovalPollIfLocked() {
                 if (typeof scrollReportPreviewActionsIntoView === 'function') {
                     setTimeout(scrollReportPreviewActionsIntoView, 300);
                 }
+            } else if (st === 'aborted' || (st && st !== 'pending')) {
+                // Power-loss / server abort: unlock UI so Submit approval is not left stale.
+                handleReportApprovalNoLongerPending(data.preview, rid, st);
             }
         }).catch(function () {});
     }, 5000);
+}
+
+/** Unlock approval UI when report is no longer pending (aborted, approved elsewhere, etc.). */
+function handleReportApprovalNoLongerPending(preview, reportId, status) {
+    stopReportApprovalPoll();
+    window._lastReportPreview = preview || window._lastReportPreview;
+    clearReportApprovalGate();
+    if (typeof populateReportPreview === 'function' && preview) {
+        populateReportPreview(preview);
+    } else if (typeof applyReportPreviewLockUi === 'function') {
+        applyReportPreviewLockUi(preview);
+    }
+    if (typeof updateReportApprovePanelForPreview === 'function') {
+        updateReportApprovePanelForPreview(preview);
+    }
+    var st = String(status || (preview && preview.reportApprovalStatus) || '').trim().toLowerCase();
+    var msg;
+    if (st === 'aborted') {
+        msg = 'This report was aborted (power interruption) and no longer needs approval. You can leave this screen.';
+    } else if (st === 'approved') {
+        msg = 'Report has been approved. You may now print or leave this screen.';
+    } else {
+        msg = 'This report is no longer pending approval.';
+    }
+    if (typeof showAppModal === 'function') {
+        showAppModal(msg, 'Report');
+    }
+    if (st === 'approved' && reportId != null && typeof _saveReportPdfSilent === 'function') {
+        _saveReportPdfSilent(reportId);
+    }
 }
 
 function setReportApproveBiometricRetryVisible(visible) {
@@ -1017,17 +1050,22 @@ function loginBiometric() {
     }).then(function (result) {
         var data = result.body || {};
         if (result.ok && data.success && data.user) {
-            window.currentUser = data.user;
-            try { localStorage.setItem('currentUser', JSON.stringify(data.user)); } catch (e) {}
-            if (typeof currentUser !== 'undefined') currentUser = data.user;
-            updateProfileFromCurrentUser(data.user);
-            showAppContainer();
-            refreshActiveQaCount();
-            goToPage('home');
+            // Hardness login path: setLoggedInUser (TapDensity used updateProfileFromCurrentUser, which is not defined here).
+            if (typeof setLoggedInUser === 'function') {
+                setLoggedInUser(data.user);
+            } else {
+                window.currentUser = data.user;
+                try { localStorage.setItem('currentUser', JSON.stringify(data.user)); } catch (e) {}
+                if (typeof currentUser !== 'undefined') currentUser = data.user;
+                if (typeof updateUIForUser === 'function') updateUIForUser();
+                if (typeof showAppContainer === 'function') showAppContainer();
+                if (typeof goToPage === 'function') goToPage('home');
+            }
+            if (typeof refreshActiveQaCount === 'function') refreshActiveQaCount();
             return;
         }
         if (result.status === 403 && data && data.passwordChangeRequired && data.username) {
-            showMandatoryPasswordResetScreen(data.username);
+            if (typeof showMandatoryPasswordResetScreen === 'function') showMandatoryPasswordResetScreen(data.username);
             return;
         }
         var msg = (data && data.error) ? String(data.error) : 'Biometric login failed.';
@@ -1406,6 +1444,31 @@ function approveReportWithVerifier(reportId, passFail, remarks, verifyMethod) {
     verifyMethod = verifyMethod === 'biometric' ? 'biometric' : 'credentials';
     var role = (typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '');
 
+    function unlockIfNoLongerPending(msg) {
+        var lower = String(msg || '').toLowerCase();
+        if (lower.indexOf('aborted') === -1 && lower.indexOf('invalid approval state') === -1) {
+            setReportApproveVerifyError(msg);
+            return Promise.resolve(null);
+        }
+        return apiRequest(API_BASE + '/api/reports/' + reportId + '/preview').then(function (prevData) {
+            var preview = prevData && prevData.preview;
+            if (typeof handleReportApprovalNoLongerPending === 'function') {
+                handleReportApprovalNoLongerPending(
+                    preview,
+                    reportId,
+                    (preview && preview.reportApprovalStatus) || 'aborted'
+                );
+            } else {
+                setReportApproveVerifyError(msg);
+            }
+            return null;
+        }).catch(function () {
+            setReportApproveVerifyError(msg);
+            if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+            return null;
+        });
+    }
+
     function postReportApprove(extraHeaders) {
         return apiRequest(API_BASE + '/api/data/reports/' + reportId + '/approve', {
             method: 'POST',
@@ -1414,8 +1477,10 @@ function approveReportWithVerifier(reportId, passFail, remarks, verifyMethod) {
         }).then(function (data) {
             if (data && data.ok) return data;
             var msg = (data && data.error) ? String(data.error) : 'Approval failed.';
-            setReportApproveVerifyError(msg);
-            return null;
+            return unlockIfNoLongerPending(msg);
+        }).catch(function (err) {
+            var msg = (err && err.message) ? String(err.message) : 'Approval failed.';
+            return unlockIfNoLongerPending(msg);
         });
     }
 

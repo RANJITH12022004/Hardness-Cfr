@@ -33,9 +33,6 @@ PERM_CARD_EXPAND: Dict[str, List[str]] = {
         "recipe-manage",
         "recipe-list",
         "recipe-edit",
-        "recipe-delete",
-        "disable-recipes",
-        "recipe-enable",
         "settings",
     ],
     "perm_recipe_approve": ["recipe-approve"],
@@ -48,7 +45,7 @@ PERM_CARD_EXPAND: Dict[str, List[str]] = {
         "user-change-role",
         "settings",
     ],
-    "perm_validation_test": ["validation-test", "validate-menu", "settings"],
+    "perm_validation_test": ["validation-test", "settings"],
     "perm_calibration_test": ["calibration-menu", "settings"],
     "perm_validation_report_approve": ["validation-report-approve"],
     "perm_calibration_report_approve": ["calibration-report-approve"],
@@ -89,39 +86,22 @@ FEATURE_CATALOG_KEYS = sorted(set(PERMISSION_CARD_KEYS + LEGACY_INTERNAL_KEYS))
 
 # --- Legacy role table (same semantics as rbac.js ROLE_RESTRICTIONS) ---
 
+# Role caps: factory-only hard denies + optional view-only soft caps.
+# Cards drive access — ROLE_RESTRICTIONS must not revoke card-granted features.
 ROLE_RESTRICTIONS: Dict[str, Dict[str, str]] = {
     "admin": {
         "factory-settings": "no-access",
         "factory-reset": "no-access",
     },
     "supervisor": {
-        "user-manage": "view-only",
-        "user-add": "no-access",
-        "user-delete": "no-access",
-        "user-unlock": "no-access",
-        "user-enable": "no-access",
-        "user-change-role": "no-access",
         "factory-settings": "view-only",
         "factory-reset": "no-access",
-        "edit-datetime": "no-access",
-        "reports-delete": "no-access",
-        "recipe-delete": "no-access",
+        "user-manage": "view-only",
+        "reports-delete": "view-only",
     },
     "user": {
-        "user-manage": "no-access",
-        "user-add": "no-access",
-        "user-delete": "no-access",
-        "user-unlock": "no-access",
-        "user-enable": "no-access",
-        "user-change-role": "no-access",
         "factory-settings": "no-access",
         "factory-reset": "no-access",
-        "edit-datetime": "no-access",
-        "recipe-edit": "no-access",
-        "recipe-delete": "no-access",
-        "reports-delete": "no-access",
-        "validate-menu": "no-access",
-        "validation-test": "no-access",
     },
     "factory": {},
     "qa": {},
@@ -208,8 +188,12 @@ def member_has_internal(member: Dict[str, Any], internal_key: str) -> bool:
     un = str((member or {}).get("username") or "").strip().upper()
     if role == "factory" or un == "RLERLT":
         return True
-    if internal_key in ("dashboard", "login", "profile", "ip-configure", "settings"):
+    # Always-on shell keys (match rbac.js getEffectiveRestriction).
+    if internal_key in ("dashboard", "login", "profile", "ip-configure"):
         return True
+    # Factory-only routes never granted by cards.
+    if internal_key in ("factory-settings", "factory-reset"):
+        return False
     internal = member_expanded_internal_keys(member)
     if internal_key in internal:
         return True

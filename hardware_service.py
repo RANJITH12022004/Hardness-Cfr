@@ -39,7 +39,7 @@ esp_read_buffer = ""
 # Response timeout for commands
 COMMAND_TIMEOUT = 2.0
 # Longer timeout for test commands (dimension/hardness) - ESP needs time to measure
-TEST_COMMAND_TIMEOUT = 30.0
+TEST_COMMAND_TIMEOUT = 45.0
 MAX_RETRIES = 3
 # Wait up to 25 seconds for ESP serial device to appear before showing error
 ESP_CONNECT_WAIT_SEC = 25

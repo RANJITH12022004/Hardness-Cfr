@@ -79,6 +79,8 @@ BIOMETRIC_PORT = os.environ.get("BIOMETRIC_PORT", "/dev/ttyAMA5")
 BIOMETRIC_BAUD = int(os.environ.get("BIOMETRIC_BAUD", "57600"))
 BIOMETRIC_ENROLL_TIMEOUT_SEC = float(os.environ.get("BIOMETRIC_ENROLL_TIMEOUT_SEC", "120"))
 BIOMETRIC_LOGIN_TIMEOUT_SEC = float(os.environ.get("BIOMETRIC_LOGIN_TIMEOUT_SEC", "30"))
+BIOMETRIC_MOCK = os.environ.get("BIOMETRIC_MOCK", "")
+BIOMETRIC_MOCK_TEMPLATE_ID = os.environ.get("BIOMETRIC_MOCK_TEMPLATE_ID", "1")
 FLASK_HOST = os.environ.get("FLASK_HOST", "127.0.0.1")
 FLASK_PORT = int(os.environ.get("FLASK_PORT", "5000"))
 EXPORT_SUBFOLDER = "Hardness-Reports-Exported"
@@ -114,6 +116,8 @@ config = {
     "BIOMETRIC_BAUD": BIOMETRIC_BAUD,
     "BIOMETRIC_ENROLL_TIMEOUT_SEC": BIOMETRIC_ENROLL_TIMEOUT_SEC,
     "BIOMETRIC_LOGIN_TIMEOUT_SEC": BIOMETRIC_LOGIN_TIMEOUT_SEC,
+    "BIOMETRIC_MOCK": BIOMETRIC_MOCK,
+    "BIOMETRIC_MOCK_TEMPLATE_ID": BIOMETRIC_MOCK_TEMPLATE_ID,
     "SCALE_PORT": os.environ.get("SCALE_PORT", ""),
     "SCALE_BAUD": int(os.environ.get("SCALE_BAUD", "9600")),
     "SCALE_BYTESIZE": os.environ.get("SCALE_BYTESIZE", "8"),
@@ -1716,14 +1720,10 @@ def approve_report(report_id):
                 "role": "factory",
             }
         body = request.get_json(force=True, silent=True) or {}
+        # Hardness: single Pass/Fail (TapDensity-style). Do not require drum1/drum2.
         pf = (body.get("passFail") or body.get("pass_fail") or "").strip().upper()
-        drum_raw = body.get("drumPassFail") or body.get("drum_pass_fail") or {}
-        drum1_pf = (drum_raw.get("drum1") or body.get("drum1PassFail") or body.get("drum1_pass_fail") or pf or "").strip().upper()
-        drum2_pf = (drum_raw.get("drum2") or body.get("drum2PassFail") or body.get("drum2_pass_fail") or pf or "").strip().upper()
-        if drum1_pf not in ("PASS", "FAIL") or drum2_pf not in ("PASS", "FAIL"):
-            return jsonify({"ok": False, "error": "Each drum passFail must be PASS or FAIL"}), 400
         if pf not in ("PASS", "FAIL"):
-            pf = "FAIL" if ("FAIL" in (drum1_pf, drum2_pf)) else "PASS"
+            return jsonify({"ok": False, "error": "passFail must be PASS or FAIL"}), 400
         remarks = (body.get("remarks") or "").strip()
         approver_name = (body.get("approverName") or "").strip()
         role_header = (request.headers.get("X-User-Role") or "").strip()
@@ -1747,37 +1747,41 @@ def approve_report(report_id):
             if existing_approver and existing_approver == verified_username:
                 return jsonify({"ok": False, "error": "Same person cannot approve twice"}), 409
             return jsonify({"ok": True, "report": report, "preview": report_service.get_report_preview_data(report)}), 200
+        if st == "aborted":
+            return jsonify({
+                "ok": False,
+                "error": "Report was aborted (power interruption) and cannot be approved.",
+                "reportApprovalStatus": "aborted",
+            }), 400
         if st != "pending":
-            return jsonify({"ok": False, "error": "Invalid approval state"}), 400
+            return jsonify({
+                "ok": False,
+                "error": "Invalid approval state",
+                "reportApprovalStatus": st_raw,
+            }), 400
         op_username = _report_operated_by_username(report)
         if op_username and verified_username == op_username and _effective_request_role() != "factory":
             return jsonify({"ok": False, "error": "Operator cannot approve their own report."}), 403
         verified_name = (verified.get("name") or verified.get("username") or approver_name or "—").strip()
-        verified_role = (verified.get("role") or role_header or "").strip()
+        # Name + employee id only (same shape as Operated by) — do not append role.
         by_line = verified_name
-        if verified_role:
-            by_line = "{} ({})".format(verified_name, _display_role_label(verified_role))
         report["reportApprovalStatus"] = "approved"
         report["approvalPassFail"] = pf
-        report["drumPassFail"] = {"drum1": drum1_pf, "drum2": drum2_pf}
         report["approvalRemarks"] = remarks
         report["approvedBy"] = by_line
         report["approvedByUsername"] = verified_username
+        report["approvedByEmployeeId"] = verified_username or "--"
         report["approvedAt"] = _utc_now_iso()
+        # Drop TapDensity drum fields if present on older records
+        report.pop("drumPassFail", None)
         td = report.get("testData")
         if isinstance(td, dict):
-            results = td.get("stepResults")
-            drum_pfs = [drum1_pf, drum2_pf]
-            if isinstance(results, list):
-                for idx, row in enumerate(results):
-                    if isinstance(row, dict):
-                        row_pf = drum_pfs[idx] if idx < len(drum_pfs) else pf
-                        row["resultText"] = row_pf
-                        row["approvalPassFail"] = row_pf
-                        if not row.get("drumLabel"):
-                            row["drumLabel"] = "Drum {}".format(idx + 1)
+            td = dict(td)
             td["approvalPassFail"] = pf
-            td["drumPassFail"] = {"drum1": drum1_pf, "drum2": drum2_pf}
+            td["approvedBy"] = by_line
+            td["approvedByUsername"] = verified_username
+            td["approvedByEmployeeId"] = verified_username or "--"
+            td.pop("drumPassFail", None)
             report["testData"] = td
         data_service.save_report(report)
         try:
@@ -3678,16 +3682,124 @@ def check_tolerance_t1t2_endpoint():
 # =================== REPORTS PREVIEW / EXPORT ==========================
 
 
+@app.route("/api/recipes/export", methods=["POST"])
+def export_recipes():
+    """Export one or more recipes as 80-char A4 + thermal text files to external USB.
+
+    Body:
+      recipe_ids:   [int, ...]           (optional if recipe_data provided)
+      recipe_data:  { ... }              (optional single recipe payload from preview)
+      device_path:  "/dev/sdb1"          (optional; required if multiple pendrives)
+      export_path:  "/abs/path"          (optional; override for dev)
+    """
+    mounted_now = None
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        gate = _require_export_usb_and_verification_json()
+        if gate is not None:
+            return gate
+        gate2 = _require_any_session_internal(
+            ["recipe-list", "recipe-edit", "recipe-manage", "export-usb"],
+            "Forbidden. You do not have permission to export recipes.",
+        )
+        if gate2 is not None:
+            return gate2
+
+        device_path = (data.get("device_path") or "").strip() or None
+        requested_export_path = (data.get("export_path") or "").strip() or None
+        export_dir, err, devices, mounted_now = _resolve_export_destination(device_path, requested_export_path)
+        if err == "MULTIPLE_PENDRIVES":
+            return jsonify({"success": False, "error": "Multiple pendrives detected. Choose one.", "devices": devices, "code": "MULTIPLE_PENDRIVES"}), 409
+        if err:
+            return jsonify({"success": False, "error": err, "devices": devices}), 400
+
+        recipes = []
+        raw_ids = data.get("recipe_ids") or []
+        for rid in raw_ids:
+            try:
+                rid_i = int(rid)
+            except (TypeError, ValueError):
+                continue
+            rec = data_service.get_recipe(rid_i)
+            if rec:
+                recipes.append(rec)
+        single = data.get("recipe_data")
+        if isinstance(single, dict) and (single.get("productName") or single.get("name") or single.get("parameters")):
+            recipes.append(single)
+        if not recipes:
+            return jsonify({"success": False, "error": "No recipe data to export."}), 400
+
+        export_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            factory = report_service.enrich_factory_settings(data_service.get_factory_settings() or {})
+        except Exception:
+            factory = {}
+
+        exported_files = []
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        for idx, recipe in enumerate(recipes):
+            recipe = dict(recipe)
+            if not recipe.get("factorySettings"):
+                recipe["factorySettings"] = factory
+            rid = recipe.get("id")
+            safe_name = "".join(
+                c if c.isalnum() or c in ("-", "_") else "_"
+                for c in str(recipe.get("productName") or recipe.get("name") or "recipe")
+            )[:40].strip("_") or "recipe"
+            base = "recipe_{}_{}_{}".format(safe_name, rid if rid is not None else idx + 1, stamp)
+            text_a4 = print_service._format_recipe_text(recipe, width=print_service.A4_TEXT_WIDTH)
+            text_a4 = text_a4.rstrip() + "\r\n\x0c"
+            text_th = print_service._format_recipe_text(recipe, width=print_service.THERMAL_WIDTH)
+            path_a4 = export_dir / (base + "_a4.txt")
+            path_th = export_dir / (base + "_thermal.txt")
+            path_a4.write_text(text_a4, encoding="utf-8")
+            path_th.write_text(text_th, encoding="utf-8")
+            exported_files.append(str(path_a4))
+            exported_files.append(str(path_th))
+
+        _audit(
+            None,
+            None,
+            "Recipes exported",
+            "Exported {} recipe file set(s) to USB".format(len(recipes)),
+        )
+
+        unmount_detail = None
+        if mounted_now and not requested_export_path:
+            power_off = bool(data.get("power_off") or False)
+            unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
+
+        return jsonify({
+            "success": True,
+            "count": len(recipes),
+            "exported_files": exported_files,
+            "export_directory": str(export_dir),
+            "unmount_detail": unmount_detail,
+            "device_path": device_path or (devices[0]["path"] if len(devices) == 1 else None),
+        }), 200
+    except Exception as e:
+        if mounted_now:
+            try:
+                usb_export.sync_and_unmount_pendrive(mounted_now, power_off=False)
+            except Exception:
+                pass
+        app.logger.exception("Error exporting recipes")
+        return jsonify({"success": False, "error": _friendly_export_error(e)}), 500
+
+
 @app.route("/api/reports/<int:report_id>/preview", methods=["GET"])
 def get_report_preview(report_id):
     try:
         gate = _require_any_session_internal(
             [
                 "reports-view",
+                "quick-test",
                 "recipe-test",
                 "validation-test",
+                "calibration-menu",
                 "test-report-approve",
                 "validation-report-approve",
+                "calibration-report-approve",
             ],
             "Forbidden. You do not have permission to view reports.",
         )
@@ -4362,24 +4474,11 @@ def calibrate_tare():
     return jsonify(result)
 
 
-def _require_calibration_start_approval():
-    """Non-factory users must present a calibration authorization token before hardware calibrate."""
-    if _effective_request_role() == "factory":
-        return None
-    _verified, verify_err = _consume_approval_verify_token("calibration")
-    if verify_err:
-        return jsonify({"ok": False, "error": verify_err}), 401
-    return None
-
-
 @app.route("/api/hardware/calibrate/load", methods=["POST"])
 def calibrate_load():
     gate = _require_session_internal("calibration-menu", "Forbidden. You do not have permission to calibrate.")
     if gate:
         return gate
-    auth_gate = _require_calibration_start_approval()
-    if auth_gate:
-        return auth_gate
     result = hardware_service.send_command("C,LOAD*")
     return jsonify(result)
 
@@ -4406,9 +4505,6 @@ def calibrate_distance_span():
     gate = _require_session_internal("calibration-menu", "Forbidden. You do not have permission to calibrate.")
     if gate:
         return gate
-    auth_gate = _require_calibration_start_approval()
-    if auth_gate:
-        return auth_gate
     result = hardware_service.send_command("C,DS*", timeout=None)
     if result.get("ok"):
         resp = (result.get("response") or "").upper()

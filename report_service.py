@@ -31,12 +31,23 @@ def generate_report(
 ) -> Dict[str, Any]:
     report = dict(test_data)
     if recipe:
+        # Persist full recipe fields needed for report preview/print (not just identity).
+        td = (test_data.get("testData") if isinstance(test_data.get("testData"), dict) else None) or {}
         report["recipe"] = {
             "id": recipe.get("id"),
             "name": recipe.get("name") or recipe.get("productName"),
-            "productName": recipe.get("productName"),
-            "batchNumber": recipe.get("batchNumber"),
-            "unit": recipe.get("unit"),
+            "productName": recipe.get("productName") or td.get("productName"),
+            "batchNumber": recipe.get("batchNumber") or td.get("batchNumber") or td.get("batch"),
+            "unit": recipe.get("unit") or td.get("unit"),
+            "sampleSize": recipe.get("sampleSize") if recipe.get("sampleSize") is not None else td.get("sampleSize"),
+            "shape": recipe.get("shape") or td.get("shape"),
+            "parameters": recipe.get("parameters") or td.get("parameters") or {},
+            "parameterSamples": recipe.get("parameterSamples") or td.get("parameterSamples") or {},
+            "parameterTolerances": recipe.get("parameterTolerances") or td.get("parameterTolerances") or {},
+            "mode": recipe.get("mode") or td.get("mode"),
+            "distanceUnit": recipe.get("distanceUnit") or td.get("distanceUnit"),
+            "weightUnit": recipe.get("weightUnit") or td.get("weightUnit"),
+            "conversionFactor": recipe.get("conversionFactor") if recipe.get("conversionFactor") is not None else td.get("conversionFactor"),
         }
     if not factory_settings:
         factory_settings = data_service.get_factory_settings()
@@ -659,6 +670,8 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
         "remarks": remarks,
         "approvedBy": report.get("approvedBy"),
         "approvedAt": report.get("approvedAt"),
+        "approvedByEmployeeId": report.get("approvedByEmployeeId")
+        or report.get("approvedByUsername"),
         "reportApprovalStatus": report.get("reportApprovalStatus"),
         "approvalPassFail": report.get("approvalPassFail"),
         "approvalRemarks": report.get("approvalRemarks"),
@@ -772,10 +785,14 @@ def _validation_details_table_html(preview: Dict[str, Any]) -> str:
     rows.append('<tr><th>Date / Time</th><td colspan="3">{}</td></tr>'.format(_html_esc(date_str)))
     if report_type == "calibration":
         status = preview.get("status") or (td.get("status") if isinstance(td, dict) else None) or "Calibrated"
-        subtype = preview.get("calibrationSubtype") or "load"
+        subtype = str(preview.get("calibrationSubtype") or "load").strip().lower()
+        if subtype in ("distance-zero", "distance", "distance_zero", "distance-span"):
+            cal_type_label = "Distance Calibration"
+        else:
+            cal_type_label = "Weight Calibration"
         rows.append(
             '<tr><th>Calibration Type</th><td>{}</td><th>Status</th><td>{}</td></tr>'.format(
-                _html_esc(subtype), _html_esc(status)
+                _html_esc(cal_type_label), _html_esc(status)
             )
         )
     else:

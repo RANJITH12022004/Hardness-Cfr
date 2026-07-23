@@ -11,6 +11,9 @@ import json
 import os
 import pathlib
 import secrets
+import threading
+import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
@@ -20,6 +23,9 @@ _config = {}
 _storage_dir = None
 _reports_dir = None
 _current_user = None
+_json_write_locks_guard = threading.Lock()
+_json_write_locks: Dict[str, threading.Lock] = {}
+_session_write_lock = threading.Lock()
 
 FACTORY_USERNAME = "RLERLT"
 FACTORY_PASSWORD = "Rahul"
@@ -168,6 +174,7 @@ def _normalize_factory_settings_dict(settings: Dict[str, Any]) -> Dict[str, Any]
         ("maxUsers", 10, 1, 999),
         ("maxAdmins", 2, 1, 99),
         ("maxSupervisors", 3, 1, 99),
+        ("maxQa", 3, 1, 99),
         ("passwordResetPeriodDays", 30, 1, 3650),
         ("autoLogoutMinutes", 0, 0, 10080),
     ]:
@@ -178,6 +185,8 @@ def _normalize_factory_settings_dict(settings: Dict[str, Any]) -> Dict[str, Any]
             except (ValueError, TypeError):
                 val = default
             merged[key] = val
+        else:
+            merged[key] = default
     return merged
 
 
@@ -238,13 +247,87 @@ def _load_json_file(filepath: pathlib.Path, default=_LOAD_JSON_USE_LIST_DEFAULT)
             data = json.load(f)
             return data if data is not None else default
     except Exception:
+        # Recover from a previous atomic write if the main file was truncated mid-write (VFAT).
+        bak = filepath.with_suffix(filepath.suffix + ".bak")
+        if bak.exists():
+            try:
+                with open(bak, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data is not None:
+                        try:
+                            _save_json_file(filepath, data)
+                        except Exception:
+                            pass
+                        return data
+            except Exception:
+                pass
         return default
 
 
+def _json_write_lock_for(filepath: pathlib.Path) -> threading.Lock:
+    key = str(filepath.resolve()) if filepath else str(filepath)
+    with _json_write_locks_guard:
+        lock = _json_write_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _json_write_locks[key] = lock
+        return lock
+
+
 def _save_json_file(filepath: pathlib.Path, data):
+    """Atomic JSON write (unique temp + fsync + replace).
+
+    VFAT + concurrent writers previously shared one ``*.json.tmp`` path, so one
+    request could delete another's temp before ``os.replace`` → Errno 2 during
+    report preview / session refresh.
+    """
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    lock = _json_write_lock_for(filepath)
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    with lock:
+        # Unique temp name avoids clobbering a concurrent write to the same file.
+        tmp_name = "{}.{}.{}.tmp".format(filepath.name, os.getpid(), uuid.uuid4().hex[:8])
+        tmp_path = filepath.parent / tmp_name
+        bak_path = filepath.with_suffix(filepath.suffix + ".bak")
+        last_err = None
+        for attempt in range(3):
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(payload)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except OSError:
+                        pass
+                if filepath.exists():
+                    try:
+                        os.replace(filepath, bak_path)
+                    except OSError:
+                        try:
+                            import shutil
+                            shutil.copy2(filepath, bak_path)
+                        except OSError:
+                            pass
+                os.replace(tmp_path, filepath)
+                try:
+                    dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except OSError:
+                    pass
+                return
+            except OSError as e:
+                last_err = e
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
+                time.sleep(0.02 * (attempt + 1))
+        if last_err:
+            raise last_err
 
 
 # =================== RECIPE OPERATIONS ==========================
@@ -582,11 +665,12 @@ def count_active_supervisor_members() -> int:
 
 
 def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], existing_member: Optional[Dict] = None):
-    """Check factory limits for users, admins, supervisors. Raise ValueError if exceeded."""
+    """Check factory limits for users, admins, supervisors/reviewers, and QA. Raise ValueError if exceeded."""
     fs = get_factory_settings()
     max_users = int(fs.get("maxUsers") or 10)
     max_admins = int(fs.get("maxAdmins") or 2)
     max_supervisors = int(fs.get("maxSupervisors") or 3)
+    max_qa = int(fs.get("maxQa") or 3)
 
     def count_role(ms: List, r: str) -> int:
         return sum(1 for m in ms if str(m.get("role", "")).strip().lower() == r)
@@ -595,6 +679,7 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
     users = count_role(members, "user")
     admins = count_role(members, "admin")
     supervisors = count_role(members, "supervisor")
+    qa = count_role(members, "qa")
 
     if existing_member:
         old_role = str(existing_member.get("role", "")).strip().lower()
@@ -604,6 +689,8 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
             admins -= 1
         elif old_role == "supervisor":
             supervisors -= 1
+        elif old_role == "qa":
+            qa -= 1
 
     if new_role == "user":
         users += 1
@@ -611,6 +698,8 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
         admins += 1
     elif new_role == "supervisor":
         supervisors += 1
+    elif new_role == "qa":
+        qa += 1
 
     if users > max_users:
         raise ValueError("Your limit for users reached. Contact support for upgrade.")
@@ -618,6 +707,8 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
         raise ValueError("Your limit for admins reached. Contact support for upgrade.")
     if supervisors > max_supervisors:
         raise ValueError("Your limit for reviewers reached. Contact support for upgrade.")
+    if qa > max_qa:
+        raise ValueError("Your limit for QA profiles reached. Contact support for upgrade.")
 
 
 def _member_username_key(member: Dict[str, Any]) -> str:
@@ -1238,13 +1329,7 @@ def get_factory_settings() -> Dict[str, Any]:
     settings = _load_json_file(settings_path, default={})
     if not isinstance(settings, dict):
         settings = {}
-    if "biometricEnabled" not in settings:
-        settings["biometricEnabled"] = True
-    if "passwordResetPeriodDays" not in settings:
-        settings["passwordResetPeriodDays"] = 30
-    if "autoLogoutMinutes" not in settings:
-        settings["autoLogoutMinutes"] = 0
-    return settings
+    return _normalize_factory_settings_dict(settings)
 
 
 def save_factory_settings(settings: Dict[str, Any]):
@@ -1260,52 +1345,40 @@ def save_factory_settings(settings: Dict[str, Any]):
         settings = dict(settings)
         settings["loadCellRange"] = lcr
 
-    def _to_bool(v):
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, (int, float)):
-            return bool(v)
-        if isinstance(v, str):
-            t = v.strip().lower()
-            if t in ("false", "0", "off", "no", "disabled"):
-                return False
-            if t in ("true", "1", "on", "yes", "enabled"):
-                return True
-        return True
-
     if not isinstance(settings, dict):
         settings = {}
     merged = dict(get_factory_settings())
     merged.update(settings)
-    merged["biometricEnabled"] = _to_bool(merged.get("biometricEnabled", True))
-    for key, default, min_val, max_val in [
-        ("maxRecipes", 150, 1, 999),
-        ("maxUsers", 10, 1, 999),
-        ("maxAdmins", 2, 1, 99),
-        ("maxSupervisors", 3, 1, 99),
-        ("passwordResetPeriodDays", 30, 1, 3650),
-        ("autoLogoutMinutes", 0, 0, 10080),
-    ]:
-        val = merged.get(key)
-        if val is not None:
-            try:
-                val = max(min_val, min(max_val, int(val)))
-            except (ValueError, TypeError):
-                val = default
-            merged[key] = val
+    merged = _normalize_factory_settings_dict(merged)
+    if "loadCellRange" in settings:
+        merged["loadCellRange"] = settings["loadCellRange"]
     settings_path = _get_storage_path("factorySettings.json")
     _save_json_file(settings_path, merged)
+    # Keep APP_ROOT mirror in sync so power-loss recovery never reloads a stale copy.
+    try:
+        mirror = _factory_settings_mirror_path()
+        if mirror.resolve() != settings_path.resolve():
+            _save_json_file(mirror, merged)
+    except OSError:
+        pass
 
 
 # =================== SESSION ==========================
 
 
 def save_current_user(user: Dict[str, Any]):
-    """Save current logged-in user session."""
+    """Save current logged-in user session (in-memory + disk). Disk failures do not drop the session."""
     global _current_user
-    _current_user = dict(user)
-    session_path = _get_storage_path("current_user.json")
-    _save_json_file(session_path, _current_user)
+    with _session_write_lock:
+        _current_user = dict(user) if user else None
+        if not _current_user:
+            return
+        session_path = _get_storage_path("current_user.json")
+        try:
+            _save_json_file(session_path, _current_user)
+        except OSError as e:
+            # Preview/RBAC refresh must not fail the whole request if VFAT is busy.
+            print("[data_service] warning: could not persist current_user.json: {}".format(e))
 
 
 def get_current_user() -> Optional[Dict[str, Any]]:
@@ -1351,12 +1424,22 @@ def refresh_current_user_from_member() -> Optional[Dict[str, Any]]:
 def clear_current_user():
     """Clear current user session."""
     global _current_user
-    _current_user = None
-    session_path = _get_storage_path("current_user.json")
-    if session_path.exists():
+    with _session_write_lock:
+        _current_user = None
+        session_path = _get_storage_path("current_user.json")
+        if session_path.exists():
+            try:
+                session_path.unlink()
+            except Exception:
+                pass
         try:
-            session_path.unlink()
-        except Exception:
+            parent = session_path.parent
+            for p in parent.glob(session_path.name + ".*.tmp"):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        except OSError:
             pass
 
 

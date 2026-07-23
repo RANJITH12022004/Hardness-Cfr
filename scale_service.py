@@ -42,6 +42,27 @@ def init(app, config):
     _line_regex = re.compile(lr) if lr else None
     _weight_regex = re.compile(wr) if wr else None
 
+    # Refuse to steal the R307 UART if misconfigured onto the same device node.
+    global _last_error
+    scale_port = str(_config.get("SCALE_PORT") or "").strip()
+    bio_port = str(_config.get("BIOMETRIC_PORT") or os.environ.get("BIOMETRIC_PORT") or "").strip()
+    if scale_port and bio_port and os.path.exists(scale_port) and os.path.exists(bio_port):
+        try:
+            same = os.path.realpath(scale_port) == os.path.realpath(bio_port)
+        except OSError:
+            same = scale_port == bio_port
+        if same:
+            if _logger:
+                _logger.error(
+                    "[SCALE] SCALE_PORT=%s conflicts with BIOMETRIC_PORT — scale disabled so fingerprint can work",
+                    scale_port,
+                )
+            _config["SCALE_PORT"] = ""
+            _last_error = "SCALE_PORT conflicts with BIOMETRIC_PORT"
+            threading.Thread(target=scale_reader_loop, daemon=True).start()
+            _logger.info("[SCALE] Reader thread started (scale UART disabled due to biometric conflict)")
+            return
+
     rm = (str(_config.get("SCALE_READ_MODE") or os.environ.get("SCALE_READ_MODE") or "frame")).strip().lower()
     fs = int(_config.get("SCALE_FRAME_SIZE") or os.environ.get("SCALE_FRAME_SIZE") or 8)
     if rm not in ("frame", "line"):

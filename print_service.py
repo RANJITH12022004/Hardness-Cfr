@@ -32,6 +32,11 @@ except ImportError:
 
 A4_CANDIDATES = ["/dev/ttyAMA4", "/dev/ttyUSB0", "/dev/ttyUSB1"]
 THERMAL_CANDIDATES = ["/dev/ttyAMA3", "/dev/ttyUSB0", "/dev/ttyUSB1"]
+A4_TEXT_WIDTH = 80
+# Match TapDensity / physical cutter: 32 cols, line-by-line send (chunked UTF-8 drops start of print).
+THERMAL_WIDTH = 32
+THERMAL_LINE_CHUNK = 32
+THERMAL_POST_PRINT_FEED_LINES = 10
 
 
 def _probe_port(port: str, candidates: list) -> str:
@@ -145,7 +150,7 @@ def _send_printer_init(ser: serial.Serial) -> None:
 def _send_text_chunked(ser: serial.Serial, text: str, baud: int, chunk_size: int = 64) -> None:
     """
     Send text to serial port in chunks to avoid buffer overflow.
-    Thermal and RS232 printers often have small buffers (256B-4KB).
+    Prefer _send_text_to_thermal for thermal printers (line-safe).
     """
     try:
         data = text.encode('utf-8', errors='replace')
@@ -161,9 +166,48 @@ def _send_text_chunked(ser: serial.Serial, text: str, baud: int, chunk_size: int
     time.sleep(0.1)  # Final pause for printer to process last chunk
 
 
+def _fit_thermal_line(line: str, width: int = THERMAL_WIDTH) -> list:
+    """Split a single logical line to at most `width` characters per row."""
+    s = str(line) if line is not None else ""
+    if not s.strip() and s == "":
+        return [""]
+    if len(s) <= width:
+        return [s]
+    out = []
+    while s:
+        out.append(s[:width])
+        s = s[width:]
+    return out
+
+
+def _send_text_to_thermal(ser, text: str, baud: int) -> None:
+    """
+    Send thermal text one line at a time (max THERMAL_WIDTH chars per row).
+    Avoids buffer overrun that drops the start of long chunked UTF-8 writes (TapDensity).
+    """
+    line_delay = 0.06 if baud <= 9600 else 0.035
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    for line in text.split("\n"):
+        if line == "":
+            ser.write(b"\n")
+            ser.flush()
+            time.sleep(0.02)
+            continue
+        for chunk in _fit_thermal_line(line, THERMAL_LINE_CHUNK):
+            payload = (chunk + "\n").encode("latin-1", errors="replace")
+            ser.write(payload)
+            ser.flush()
+            time.sleep(line_delay)
+    for _ in range(THERMAL_POST_PRINT_FEED_LINES):
+        ser.write(b"\n")
+        ser.flush()
+        time.sleep(0.06)
+    time.sleep(0.5)
+
+
 def _send_text_to_a4(ser: serial.Serial, text: str, baud: int) -> int:
     """
-    Send text to A4 printer with \\r\\n line endings and dt sample chunk parameters.
+    Send text to A4 printer with \\r\\n line endings (80-char layout expected).
     Returns number of bytes written.
     """
     text = text.replace("\r\n", "\n").replace("\n", "\r\n")
@@ -196,7 +240,7 @@ def _send_bytes_chunked(ser: serial.Serial, data: bytes, baud: int, chunk_size: 
 
 def save_report_text_files(report_data: Dict[str, Any], report_id: int, reports_dir: pathlib.Path) -> None:
     """
-    Save full report as two text files: 70-char (A4/dot matrix) and 48-char (thermal).
+    Save full report as two text files: 80-char (A4/dot matrix) and thermal-width cutter text.
     Does not raise; log and return on failure so report still saves to JSON.
     """
     if not report_data or report_id is None:
@@ -204,14 +248,14 @@ def save_report_text_files(report_data: Dict[str, Any], report_id: int, reports_
     reports_dir = pathlib.Path(reports_dir)
     try:
         reports_dir.mkdir(parents=True, exist_ok=True)
-        text_48 = _format_report_text(report_data, width=48)
-        # A4 file: native 70-char format with ====, ---, and ** separators (not converted from thermal)
-        text_70 = _format_report_text(report_data, width=70)
-        text_70 = text_70.rstrip() + "\r\n\x0c"  # Form feed for A4 page eject
+        text_thermal = _format_report_text(report_data, width=THERMAL_WIDTH)
+        # A4 file: native 80-char format with ====, ---, and ** separators
+        text_a4 = _format_report_text(report_data, width=A4_TEXT_WIDTH)
+        text_a4 = text_a4.rstrip() + "\r\n\x0c"  # Form feed for A4 page eject
         path_a4 = reports_dir / f"report_{report_id}_a4.txt"
         path_thermal = reports_dir / f"report_{report_id}_thermal.txt"
-        path_a4.write_text(text_70, encoding="utf-8")
-        path_thermal.write_text(text_48, encoding="utf-8")
+        path_a4.write_text(text_a4, encoding="utf-8")
+        path_thermal.write_text(text_thermal, encoding="utf-8")
     except Exception as e:
         # Do not fail the API; report is already saved to JSON
         import logging
@@ -257,8 +301,12 @@ def print_report_from_file(txt_path: pathlib.Path, port: str, baud: int, printer
             ser = serial.Serial(port=port, baudrate=baud, timeout=2.0)
             try:
                 _send_printer_init(ser)
-                _send_bytes_chunked(ser, data, baud, chunk_size=64)
-                time.sleep(0.5)
+                # Decode stored thermal text and send line-by-line (safe for cutter buffer).
+                try:
+                    text = data.decode("utf-8", errors="replace")
+                except Exception:
+                    text = data.decode("latin-1", errors="replace")
+                _send_text_to_thermal(ser, text, baud)
                 return {"success": True, "port": port}
             finally:
                 ser.close()
@@ -341,14 +389,12 @@ def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str
     except FileNotFoundError as e:
         return {"success": False, "error": f"Thermal printer port not found: {e.filename or port}", "port": port}
     try:
-        # Format report for thermal printer
+        # Format report for thermal printer (32-col TapDensity-compatible)
         formatted_text = format_for_thermal_printer(report_data)
-        formatted_text = formatted_text.rstrip("\n") + "\n\n"  # Trailing feed so printer flushes/ejects
         ser = serial.Serial(port=port, baudrate=baud, timeout=2.0)
         try:
             _send_printer_init(ser)
-            _send_text_chunked(ser, formatted_text, baud, chunk_size=64)
-            time.sleep(0.5)  # Allow printer to process
+            _send_text_to_thermal(ser, formatted_text, baud)
             return {"success": True, "port": port}
         finally:
             ser.close()
@@ -360,11 +406,10 @@ def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str
         }
 
 
-def convert_thermal_to_a4_layout(text: str, width: int = 70) -> str:
+def convert_thermal_to_a4_layout(text: str, width: int = A4_TEXT_WIDTH) -> str:
     """
-    Convert thermal layout text (48 chars) to A4 layout (70 chars).
+    Convert thermal layout text to A4 layout (80 chars).
     Merges wrapped lines and re-wraps at width. Inverse of convert_a4_to_thermal_layout.
-    Same approach as dt sample: merge paragraphs, re-wrap at word boundaries.
     """
     if not text:
         return ""
@@ -407,27 +452,35 @@ def convert_thermal_to_a4_layout(text: str, width: int = 70) -> str:
     return "\n".join(out)
 
 
-def format_for_a4_printer(report_html: str) -> str:
+def format_for_a4_printer(report_data: Any, *, include_printed_timestamp: bool = True) -> str:
     """
-    Format report for A4 printer (70-char width).
-    Uses native 70-char layout with ====, ---, and ** separators (same as saved A4 file).
+    Format report for A4 printer (80-char width, TapDensity / Friability layout).
+    Uses native 80-char layout with ====, ---, and ** separators (same as saved A4 file).
+    Always appends Printed Date / Printed Time footer for calibration, validation, and test reports.
     """
-    # If input is report_data dict: use native 70-char format with separators
-    if isinstance(report_html, dict):
-        return _format_report_text(report_html, width=70)
-    # If input is HTML string, basic conversion
-    return report_html.replace('<br>', '\n').replace('</p>', '\n')
+    if isinstance(report_data, dict):
+        text = _format_report_text(report_data, width=A4_TEXT_WIDTH).rstrip("\n")
+        if include_printed_timestamp:
+            stamp = "\n".join(_thermal_printed_timestamp_lines())
+            if "Printed Date:" not in text:
+                text = text + stamp
+        return text
+    return str(report_data).replace('<br>', '\n').replace('</p>', '\n')
 
 
 def format_for_thermal_printer(report_data: Dict[str, Any]) -> str:
     """
-    Format report for thermal printer (48-char width).
-    Converts report data to narrow thermal format.
+    Format report for thermal printer (THERMAL_WIDTH chars, default 32).
+    Always appends Printed Date / Printed Time footer for calibration, validation, and test reports.
     """
-    return _format_report_text(report_data, width=48)
+    text = _format_report_text(report_data, width=THERMAL_WIDTH).rstrip("\n")
+    stamp = "\n".join(_thermal_printed_timestamp_lines())
+    if "Printed Date:" not in text:
+        text = text + stamp
+    return text
 
 
-def _format_recipe_text(recipe_data: Dict[str, Any], width: int = 70) -> str:
+def _format_recipe_text(recipe_data: Dict[str, Any], width: int = A4_TEXT_WIDTH) -> str:
     """
     Format recipe (tablet details only) for printing. Includes tolerances (T2-, T1-, NOM, T1+, T2+).
     """
@@ -549,8 +602,7 @@ def print_recipe_a4(recipe_data: Dict[str, Any], printer_port: Optional[str] = N
     if not port or not os.path.exists(port):
         return {"success": False, "error": f"A4 printer port not found: {port}", "port": port}
     try:
-        text = _format_recipe_text(recipe_data, width=48)
-        text = convert_thermal_to_a4_layout(text, width=70)
+        text = _format_recipe_text(recipe_data, width=A4_TEXT_WIDTH)
         text = text.rstrip() + "\r\n\x0c"  # Form feed
         ser = _open_a4_serial(port, baud)
         try:
@@ -587,13 +639,11 @@ def print_recipe_thermal(recipe_data: Dict[str, Any], printer_port: Optional[str
     except FileNotFoundError as e:
         return {"success": False, "error": f"Thermal printer port not found: {e.filename or port}", "port": port}
     try:
-        text = _format_recipe_text(recipe_data, width=48)
-        text = text.rstrip("\n") + "\n\n"
+        text = _format_recipe_text(recipe_data, width=THERMAL_WIDTH)
         ser = serial.Serial(port=port, baudrate=baud, timeout=2.0)
         try:
             _send_printer_init(ser)
-            _send_text_chunked(ser, text, baud, chunk_size=64)
-            time.sleep(0.5)
+            _send_text_to_thermal(ser, text, baud)
             return {"success": True, "port": port}
         finally:
             ser.close()
@@ -614,6 +664,59 @@ def _non_negative_display(val: Any, decimals: Optional[int] = None) -> str:
         return str(int(n)) if n == int(n) else str(n)
     except (TypeError, ValueError):
         return str(val)
+
+
+STAT_NUM_WIDTH = 6
+STAT_COUNT_WIDTH = 3
+EMPTY_STAT = "--"
+
+
+def _format_stat_number(val: Any, decimals: int = 2, width: int = STAT_NUM_WIDTH) -> str:
+    """Right-align numeric stat cell; empty → '--'."""
+    if val is None or val == "" or val == "--":
+        return EMPTY_STAT.rjust(width)
+    if isinstance(val, str) and val.upper() == "OL":
+        return "OL".rjust(width)
+    try:
+        n = float(val) if not isinstance(val, (int, float)) else float(val)
+        return f"{n:.{decimals}f}".rjust(width)
+    except (TypeError, ValueError):
+        return str(val)[:width].rjust(width)
+
+
+def _format_stat_count(val: Any, width: int = STAT_COUNT_WIDTH) -> str:
+    """Right-align sample count; empty → '--'."""
+    if val is None or val == "" or val == "--":
+        return EMPTY_STAT.rjust(width)
+    try:
+        return str(int(val)).rjust(width)
+    except (TypeError, ValueError):
+        return str(val)[:width].rjust(width)
+
+
+def _format_stat_rsd(val: Any, width: int = STAT_NUM_WIDTH) -> str:
+    """Right-align RSd as 'XX.XX%'; empty → '--'."""
+    if val is None or val == "" or val == "--":
+        return EMPTY_STAT.rjust(width)
+    try:
+        n = float(val) if not isinstance(val, (int, float)) else float(val)
+        return f"{n:.2f}%".rjust(width)
+    except (TypeError, ValueError):
+        return str(val)[:width].rjust(width)
+
+
+def _join_fixed_width_row(cells: list, widths: list, left_cols: Optional[set] = None) -> str:
+    """Join table cells with ' | ' using fixed column widths."""
+    left = left_cols or {0}
+    parts = []
+    for i, cell in enumerate(cells):
+        w = widths[i] if i < len(widths) else 10
+        s = str(cell)
+        if i in left:
+            parts.append(s.ljust(w)[:w])
+        else:
+            parts.append(s.rjust(w)[:w])
+    return " | ".join(parts)
 
 
 def _format_ts_readable(ts: Any) -> str:
@@ -638,7 +741,7 @@ def _format_ts_readable(ts: Any) -> str:
         return s
 
 
-def _format_validation_calibration_text(report_data: Dict[str, Any], width: int = 70) -> str:
+def _format_validation_calibration_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH) -> str:
     """
     Format validation or calibration report as plain text for printing.
     Output: Company, factory settings, validation/calibration details, remarks, operated-by, approved-by.
@@ -653,21 +756,38 @@ def _format_validation_calibration_text(report_data: Dict[str, Any], width: int 
     if thermal:
         lines.append("RAISE LAB EQUIPMENT")
         lines.append("")
-
-    lines.append(sep)
-    lines.append(title if thermal else title.center(width))
-    lines.append(sep)
+        lines.append(title)
+    else:
+        lines.append(sep)
+        lines.append("RAISE LAB EQUIPMENT".center(width))
+        lines.append(title.center(width))
+        lines.append(sep)
     lines.append("")
 
     factory_settings = report_data.get("factorySettings", {}) or {}
     if factory_settings:
-        lines.append(f"Company: {factory_settings.get('companyName', 'N/A')}")
-        lines.append(f"Location: {factory_settings.get('companyLocation', 'N/A')}")
-        lines.append(f"Model No: {factory_settings.get('modelNo', 'N/A')}")
-        lines.append(f"Serial No: {factory_settings.get('serialNo', 'N/A')}")
-        lines.append(f"Instrument ID: {factory_settings.get('instrumentId', 'N/A')}")
-        lines.append(f"Last Validation: {factory_settings.get('lastValidationDate', 'N/A')}")
-        lines.append(f"Next Validation Due: {factory_settings.get('nextValidationDate', 'N/A')}")
+        if thermal:
+            lines.append(f"Company: {factory_settings.get('companyName', 'N/A')}")
+            lines.append(f"Location: {factory_settings.get('companyLocation', 'N/A')}")
+            lines.append(f"Model No: {factory_settings.get('modelNo', 'N/A')}")
+            lines.append(f"Serial No: {factory_settings.get('serialNo', 'N/A')}")
+            lines.append(f"Instrument ID: {factory_settings.get('instrumentId', 'N/A')}")
+            lines.append(f"Last Validation: {factory_settings.get('lastValidationDate', 'N/A')}")
+            lines.append(f"Next Validation Due: {factory_settings.get('nextValidationDate', 'N/A')}")
+        else:
+            _append_two_column_pairs(
+                lines,
+                [
+                    ("Company", factory_settings.get("companyName", "N/A")),
+                    ("Model No", factory_settings.get("modelNo", "N/A")),
+                    ("Serial No", factory_settings.get("serialNo", "N/A")),
+                    ("Location", factory_settings.get("companyLocation", factory_settings.get("location", "N/A"))),
+                    ("Instrument ID", factory_settings.get("instrumentId", "N/A")),
+                    ("Last Val", factory_settings.get("lastValidationDate", "N/A")),
+                    ("Next Val Due", factory_settings.get("nextValidationDate", "N/A")),
+                ],
+                width,
+            )
         lines.append("")
 
     # Use current OS date/time instead of stored timestamp
@@ -694,25 +814,61 @@ def _format_validation_calibration_text(report_data: Dict[str, Any], width: int 
                 lines.append(f"  Difference: {diff:.2f} mm")
             lines.append(f"  Validation Status: {report_data.get('status', '--')}")
     else:
+        subtype = str(report_data.get("calibrationSubtype") or test_data.get("calibrationSubtype") or "load").strip().lower()
+        if subtype in ("distance-zero", "distance", "distance_zero", "distance-span"):
+            cal_type_label = "Distance Calibration"
+        else:
+            cal_type_label = "Weight Calibration"
+        lines.append(f"Calibration Type: {cal_type_label}")
         lines.append(f"Calibration Status: {report_data.get('status', test_data.get('status', 'Calibrated'))}")
 
     lines.append("")
 
-    op_name = test_data.get("operatorName") or test_data.get("operatedBy") or "N/A"
-    emp_id = test_data.get("employeeId") or test_data.get("operatorId") or "N/A"
-    lines.append(f"Operated by: {op_name}")
-    lines.append(f"Employee ID: {emp_id}")
-    lines.append("")
+    op_name = report_data.get("operatorName") or test_data.get("operatorName") or test_data.get("operatedBy") or "--"
+    emp_id = report_data.get("employeeId") or test_data.get("employeeId") or test_data.get("operatorId") or "--"
+    approved_by = _approved_by_display_name(report_data.get("approvedBy"))
+    approved_by_emp = (
+        report_data.get("approvedByEmployeeId")
+        or report_data.get("approvedByUsername")
+        or "--"
+    )
+    approval_pf = report_data.get("approvalPassFail", "--")
+    approval_remarks = report_data.get("approvalRemarks", "") or "N/A"
+    approved_at = _format_ts_readable(report_data.get("approvedAt"))
+    dash_sep = "" if thermal else ("-" * width)
 
     if thermal:
-        lines.append("Remarks:")
+        lines.extend(
+            [
+                f"Operated by: {op_name}",
+                f"Employee ID: {emp_id}",
+                f"Approved By: {approved_by}",
+                f"Employee ID: {approved_by_emp}",
+                f"Approval Result: {approval_pf}",
+                f"Approved At: {approved_at}",
+                f"Approval Remarks: {approval_remarks}",
+            ]
+        )
+    else:
         lines.append("")
-        lines.append("Approved by:")
-        lines.append("")
+        lines.append("APPROVAL")
+        lines.append(dash_sep)
+        _append_two_column_pairs(
+            lines,
+            [
+                ("Operated by", op_name),
+                ("Employee ID", emp_id),
+                ("Approved By", approved_by),
+                ("Employee ID", approved_by_emp),
+                ("Approval Result", approval_pf),
+                ("Approved At", approved_at),
+                ("Approval Remarks", _truncate_with_ellipsis(approval_remarks, max(16, width - 20))),
+            ],
+            width,
+        )
 
-    lines.append(sep)
-    lines.append(f"Generated: {current_time}")
-    lines.append(sep)
+    if not thermal:
+        lines.append(sep)
 
     if width < 70:
         wrapped_lines = []
@@ -768,7 +924,68 @@ def _wrap_text_lines(lines: list, width: int) -> list:
     return wrapped_lines
 
 
-def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
+def _truncate_with_ellipsis(value: Any, max_len: int) -> str:
+    s = "" if value is None else str(value)
+    if max_len <= 0:
+        return ""
+    if len(s) <= max_len:
+        return s
+    if max_len <= 3:
+        return "." * max_len
+    return s[: max_len - 3] + "..."
+
+
+def _append_two_column_pairs(lines: list, pairs: list, width: int) -> None:
+    """Append key/value pairs as two aligned columns (TapDensity / Friability A4 layout)."""
+    if width < 40:
+        for label, value in pairs:
+            lines.append(f"{label}: {value}")
+        return
+    gap = 4
+    col_w = max(18, (width - gap) // 2)
+    value_w = max(8, col_w - 2)
+
+    def _cell(label: Any, value: Any) -> str:
+        lbl = _truncate_with_ellipsis(label, 22)
+        val = _truncate_with_ellipsis(value, value_w)
+        text = f"{lbl}: {val}".strip()
+        return text.ljust(col_w)[:col_w]
+
+    normalized = [(str(k or "--"), str(v if v not in (None, "") else "--")) for k, v in pairs]
+    for i in range(0, len(normalized), 2):
+        left = _cell(normalized[i][0], normalized[i][1])
+        right = ""
+        if i + 1 < len(normalized):
+            right = _cell(normalized[i + 1][0], normalized[i + 1][1])
+        lines.append(left + (" " * gap) + right)
+
+
+def _thermal_printed_timestamp_lines() -> list:
+    """Printed date/time from device RTC at format time."""
+    try:
+        import rtc_service
+
+        payload = rtc_service.get_device_wall_datetime_payload()
+        pdate = payload.get("date") or "--"
+        ptime = payload.get("time") or "--"
+    except Exception:
+        now = datetime.now()
+        pdate = now.strftime("%d-%m-%Y")
+        ptime = now.strftime("%H:%M:%S")
+    return ["", f"Printed Date: {pdate}", f"Printed Time: {ptime}"]
+
+
+def _approved_by_display_name(approved_by: Any) -> str:
+    """Name only — strip legacy '(Role)' suffix from older approvedBy values."""
+    import re
+
+    s = str(approved_by or "").strip()
+    if not s or s == "--":
+        return "--"
+    return re.sub(r"\s*\([^)]*\)\s*$", "", s).strip() or "--"
+
+
+def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH) -> str:
     """
     Format report data as plain text for printing (full data matching preview).
     Reads from top-level or testData so either saved structure works.
@@ -781,10 +998,6 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
     sep = "" if thermal else ("=" * width)
     dash_sep = "" if thermal else ("-" * width)
     star_sep = "" if thermal else ("*" * width)
-
-    if thermal:
-        lines.append("RAISE LAB EQUIPMENT")
-        lines.append("")
 
     test_data = report_data.get("testData", {}) or {}
     if not isinstance(test_data, dict):
@@ -818,38 +1031,58 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
     if not isinstance(statistics, dict):
         statistics = {}
 
-    # Header (thermal: no ===, title left-aligned)
-    lines.append(sep)
-    lines.append("TABLET HARDNESS TEST REPORT" if thermal else "TABLET HARDNESS TEST REPORT".center(width))
-    lines.append(sep)
+    # Header (TapDensity / Friability A4 layout)
+    report_type = report_data.get("type", "test")
+    title = "TABLET HARDNESS TEST REPORT"
+    if str(report_type).strip().lower() == "validation":
+        title = "TABLET HARDNESS VALIDATION REPORT"
+    elif str(report_type).strip().lower() == "calibration":
+        title = "TABLET HARDNESS CALIBRATION REPORT"
+
+    if thermal:
+        lines.append("RAISE LAB EQUIPMENT")
+        lines.append("")
+        lines.append(title)
+    else:
+        lines.append(sep)
+        lines.append("RAISE LAB EQUIPMENT".center(width))
+        lines.append(title.center(width))
+        lines.append(sep)
     lines.append("")
 
     # Factory settings
     factory_settings = report_data.get("factorySettings", {}) or {}
     if factory_settings:
-        lines.append(f"Company: {factory_settings.get('companyName', 'N/A')}")
-        lines.append(f"Location: {factory_settings.get('companyLocation', 'N/A')}")
-        lines.append(f"Model No: {factory_settings.get('modelNo', 'N/A')}")
-        lines.append(f"Serial No: {factory_settings.get('serialNo', 'N/A')}")
-        lines.append(f"Instrument ID: {factory_settings.get('instrumentId', 'N/A')}")
+        if thermal:
+            lines.append(f"Company: {factory_settings.get('companyName', 'N/A')}")
+            lines.append(f"Model No: {factory_settings.get('modelNo', 'N/A')}")
+            lines.append(f"Serial No: {factory_settings.get('serialNo', 'N/A')}")
+            lines.append(f"Location: {factory_settings.get('companyLocation', 'N/A')}")
+            lines.append(f"Instrument ID: {factory_settings.get('instrumentId', 'N/A')}")
+            lines.append(f"Last Val: {factory_settings.get('lastValidationDate', 'N/A')}")
+            lines.append(f"Next Val Due: {factory_settings.get('nextValidationDate', 'N/A')}")
+        else:
+            _append_two_column_pairs(
+                lines,
+                [
+                    ("Company", factory_settings.get("companyName", "N/A")),
+                    ("Model No", factory_settings.get("modelNo", "N/A")),
+                    ("Serial No", factory_settings.get("serialNo", "N/A")),
+                    ("Location", factory_settings.get("companyLocation", factory_settings.get("location", "N/A"))),
+                    ("Instrument ID", factory_settings.get("instrumentId", "N/A")),
+                    ("Last Val", factory_settings.get("lastValidationDate", "N/A")),
+                    ("Next Val Due", factory_settings.get("nextValidationDate", "N/A")),
+                ],
+                width,
+            )
         lines.append("")
 
     # Test information (match preview)
     product_name = recipe.get("productName") or test_data.get("productName") or "N/A"
     batch_number = recipe.get("batchNumber") or recipe.get("batch") or test_data.get("batchNumber") or test_data.get("batch") or "N/A"
-    lines.append(f"Product: {product_name}")
-    lines.append(f"Batch: {batch_number}")
-    lines.append(f"Shape: {(shape or 'round').capitalize()}")
-    lines.append(f"Hardness Unit: {unit}")
-    lines.append(f"Distance Unit: {distance_unit}")
-    lines.append(f"Weight Unit: {weight_unit}")
     mode_val = (test_data.get('mode') or 'auto').lower()
-    lines.append(f"Mode: {'Manual' if mode_val == 'manual' else 'Auto'}")
-    # Match report preview (script.js): testStartTime or createdAt; Generated: testEndTime or completedAt
     ts_start_raw = test_data.get("testStartTime") or report_data.get("createdAt")
     ts_end_raw = test_data.get("testEndTime") or report_data.get("completedAt") or report_data.get("createdAt")
-    lines.append(f"Report/Test Start: {_format_ts_readable(ts_start_raw)}")
-    lines.append(f"Generated: {_format_ts_readable(ts_end_raw)}")
     duration_sec = test_data.get("durationSeconds")
     if duration_sec is None and test_data.get("testStartTime") and test_data.get("testEndTime"):
         try:
@@ -858,18 +1091,51 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
             duration_sec = int((end - start).total_seconds())
         except Exception:
             pass
+    duration_str = "--"
     if duration_sec is not None:
         total_s = int(duration_sec)
         m, s = divmod(total_s, 60)
         h, m = divmod(m, 60)
-        lines.append(f"Test Duration: {h:02d}:{m:02d}:{s:02d}")
-    report_type = report_data.get("type", "test")
-    status_label = "Test Status" if report_type == "test" else ("Validation Status" if report_type == "validation" else "Calibration Status")
+        duration_str = f"{h:02d}:{m:02d}:{s:02d}"
     _status_raw = str(test_data.get("status") or "").lower()
     status_display = "Aborted" if _status_raw == "aborted" else "Completed"
-    lines.append(f"{status_label}: {status_display}")
-    lines.append("")
-    if not thermal:
+    remarks_text = report_data.get("remarks") or test_data.get("remarks") or ""
+
+    if thermal:
+        lines.append(f"Product: {product_name}")
+        lines.append(f"Batch: {batch_number}")
+        lines.append(f"Shape: {(shape or 'round').capitalize()}")
+        lines.append(f"Hardness Unit: {unit}")
+        lines.append(f"Distance Unit: {distance_unit}")
+        lines.append(f"Weight Unit: {weight_unit}")
+        lines.append(f"Mode: {'Manual' if mode_val == 'manual' else 'Auto'}")
+        lines.append(f"Report/Test Start: {_format_ts_readable(ts_start_raw)}")
+        lines.append(f"Generated: {_format_ts_readable(ts_end_raw)}")
+        lines.append(f"Test Duration: {duration_str}")
+        lines.append(f"Test Status: {status_display}")
+        if remarks_text not in (None, ""):
+            lines.append(f"Remarks: {remarks_text}")
+        lines.append("")
+    else:
+        lines.append("TEST INFORMATION")
+        lines.append(dash_sep)
+        info_pairs = [
+            ("Product", product_name),
+            ("Batch", batch_number),
+            ("Shape", (shape or "round").capitalize()),
+            ("Hardness Unit", unit),
+            ("Distance Unit", distance_unit),
+            ("Weight Unit", weight_unit),
+            ("Mode", "Manual" if mode_val == "manual" else "Auto"),
+            ("Report/Test Start", _format_ts_readable(ts_start_raw)),
+            ("Generated", _format_ts_readable(ts_end_raw)),
+            ("Test Duration", duration_str),
+            ("Test Status", status_display),
+        ]
+        if remarks_text not in (None, ""):
+            info_pairs.append(("Remarks", _truncate_with_ellipsis(remarks_text, max(16, width - 20))))
+        _append_two_column_pairs(lines, info_pairs, width)
+        lines.append("")
         lines.append(star_sep)
 
     # Dynamic report columns: from params, or from measurements when params empty (e.g. quick test)
@@ -904,7 +1170,10 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
                 pkey = label
                 t = _get_ci(tolerances, pkey) or {}
                 nom = _get_ci(params, pkey)
-                if nom is None or (not isinstance(nom, (int, float)) and not isinstance(nom, str)):
+                if nom is None or nom == "" or (not isinstance(nom, (int, float)) and not isinstance(nom, str)):
+                    tol_nom = t.get("nominal") if isinstance(t, dict) else None
+                    nom = tol_nom if tol_nom not in (None, "") else "N/A"
+                elif not isinstance(nom, (int, float)) and not isinstance(nom, str):
                     nom = "N/A"
                 weight_unit = recipe.get("weightUnit") or test_data.get("weightUnit") or "gm"
                 u = "mm" if pkey in ("Thickness", "Diameter", "Length", "Width") else (weight_unit if pkey == "Weight" else (unit.split()[0] if unit else "N"))
@@ -933,17 +1202,20 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
                 pkey = label
                 t = _get_ci(tolerances, pkey) or {}
                 nom = _get_ci(params, pkey)
-                if nom is None or (not isinstance(nom, (int, float)) and not isinstance(nom, str)):
+                if nom is None or nom == "" or (not isinstance(nom, (int, float)) and not isinstance(nom, str)):
+                    tol_nom = t.get("nominal") if isinstance(t, dict) else None
+                    nom = tol_nom if tol_nom not in (None, "") else "N/A"
+                elif not isinstance(nom, (int, float)) and not isinstance(nom, str):
                     nom = "N/A"
                 weight_unit = recipe.get("weightUnit") or test_data.get("weightUnit") or "gm"
                 u = "mm" if pkey in ("Thickness", "Diameter", "Length", "Width") else (weight_unit if pkey == "Weight" else (unit.split()[0] if unit else "N"))
-                t2 = _non_negative_display(t.get('lowerT2', '--'))
-                t1_l = _non_negative_display(t.get('lowerT1', '--'))
-                t1_u = _non_negative_display(t.get('upperT1', '--'))
-                t2_u = _non_negative_display(t.get('upperT2', '--'))
-                nom_str = _non_negative_display(nom)
+                t2 = _format_stat_number(t.get('lowerT2', '--'))
+                t1_l = _format_stat_number(t.get('lowerT1', '--'))
+                t1_u = _format_stat_number(t.get('upperT1', '--'))
+                t2_u = _format_stat_number(t.get('upperT2', '--'))
+                nom_str = _format_stat_number(nom)
                 row = [label, t2, t1_l, nom_str, t1_u, t2_u, u]
-                row_line = " | ".join(str(v).ljust(10) for v in row)
+                row_line = _join_fixed_width_row(row, [10, 6, 6, 6, 6, 6, 6], {0, 6})
                 lines.append(row_line)
             lines.append("")
             lines.append(sep)  # Separator line after tolerances
@@ -965,10 +1237,13 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
         else:
             lines.append("Test Data (S.No, " + ", ".join(report_param_cols) + ", Result):")
         lines.append("")
-        # Header row
+        # Always define widths — thermal path also formats cells with test_col_width.
+        test_col_width = 5 if thermal else 6
+        test_widths = [2] + [test_col_width] * len(report_param_cols) + [6]
+        # Header row (A4 only)
         if not thermal:
             header = ["S.No"] + report_param_cols + ["Result"]
-            header_line = " | ".join(h.ljust(12) for h in header)
+            header_line = _join_fixed_width_row(header, test_widths, {0})
             lines.append(header_line)
             lines.append(dash_sep)
 
@@ -993,12 +1268,19 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
 
         def _nominal_for_col(col: str) -> Any:
             nom = _get_ci(params, col)
-            if nom is not None:
+            if nom is not None and nom != "":
                 return nom
             if col == "Diameter":
-                return _get_ci(params, "Diameter")
+                nom = _get_ci(params, "Diameter")
+                if nom is not None and nom != "":
+                    return nom
             if col == "Length":
-                return _get_ci(params, "Length")
+                nom = _get_ci(params, "Length")
+                if nom is not None and nom != "":
+                    return nom
+            t = _get_ci(tolerances, col) or {}
+            if isinstance(t, dict) and t.get("nominal") not in (None, ""):
+                return t.get("nominal")
             return None
 
         for i in range(sample_size):
@@ -1021,7 +1303,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
                         row_vals.append("OL")
                         has_fail = True
                     else:
-                        row_vals.append(_non_negative_display(v, 2))
+                        row_vals.append(_format_stat_number(v, 2, test_col_width))
                         try:
                             num_val = float(v) if isinstance(v, (int, float)) else float(v)
                             nom = _nominal_for_col(col)
@@ -1056,8 +1338,14 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
             if thermal:
                 lines.append(" | ".join(row_vals))
             else:
-                # A4: Table format with aligned columns
-                row_line = " | ".join(str(v).ljust(12) for v in row_vals)
+                formatted = [row_vals[0].zfill(2)]
+                for j, v in enumerate(row_vals[1:-1], start=1):
+                    if v in ("--", "OL"):
+                        formatted.append(str(v).rjust(test_col_width))
+                    else:
+                        formatted.append(_format_stat_number(v, 2, test_col_width))
+                formatted.append(str(row_vals[-1]).ljust(6)[:6])
+                row_line = _join_fixed_width_row(formatted, test_widths, {0})
                 lines.append(row_line)
         lines.append("")
         if not thermal:
@@ -1074,14 +1362,14 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
                 ps = _get_ci(statistics, pname) if isinstance(_get_ci(statistics, pname), dict) else None
                 if not ps:
                     continue
-                c = ps.get("count", "N/A")
-                m = _non_negative_display(ps.get("mean"), 2) if ps.get("mean") is not None else "N/A"
-                mx = _non_negative_display(ps.get("max"), 2) if ps.get("max") is not None else "N/A"
-                mn = _non_negative_display(ps.get("min"), 2) if ps.get("min") is not None else "N/A"
-                r = _non_negative_display(ps.get("range"), 2) if ps.get("range") is not None else "N/A"
-                sabs = _non_negative_display(ps.get("std_dev"), 2) if ps.get("std_dev") is not None else "N/A"
+                c = ps.get("count", "--")
+                m = _format_stat_number(ps.get("mean")) if ps.get("mean") is not None else EMPTY_STAT
+                mx = _format_stat_number(ps.get("max")) if ps.get("max") is not None else EMPTY_STAT
+                mn = _format_stat_number(ps.get("min")) if ps.get("min") is not None else EMPTY_STAT
+                r = _format_stat_number(ps.get("range")) if ps.get("range") is not None else EMPTY_STAT
+                sabs = _format_stat_number(ps.get("std_dev")) if ps.get("std_dev") is not None else EMPTY_STAT
                 srel_val = ps.get("srel")
-                srel = (_non_negative_display(srel_val, 2) + "%") if srel_val is not None else "N/A"
+                srel = _format_stat_rsd(srel_val) if srel_val is not None else EMPTY_STAT
                 # Remove indentation - start from left corner for thermal
                 lines.append(f"{pname}: n={c} M={m} Max={mx} Min={mn}")
                 lines.append(f"Rng={r} Sd={sabs} RSd={srel}")
@@ -1092,9 +1380,9 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
             lines.append("STATISTICS".center(width))
             lines.append(sep)
             lines.append("")
-            # Header
+            stat_widths = [10, STAT_COUNT_WIDTH] + [STAT_NUM_WIDTH] * 6
             header = ["Param", "n", "Mean", "Max", "Min", "Range", "Sd", "RSd"]
-            header_line = " | ".join(h.ljust(10) for h in header)
+            header_line = _join_fixed_width_row(header, stat_widths, {0})
             lines.append(header_line)
             lines.append(dash_sep)
             # Data rows
@@ -1102,39 +1390,65 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
                 ps = _get_ci(statistics, pname) if isinstance(_get_ci(statistics, pname), dict) else None
                 if not ps:
                     continue
-                c = ps.get("count", "N/A")
-                m = _non_negative_display(ps.get("mean"), 2) if ps.get("mean") is not None else "N/A"
-                mx = _non_negative_display(ps.get("max"), 2) if ps.get("max") is not None else "N/A"
-                mn = _non_negative_display(ps.get("min"), 2) if ps.get("min") is not None else "N/A"
-                r = _non_negative_display(ps.get("range"), 2) if ps.get("range") is not None else "N/A"
-                sabs = _non_negative_display(ps.get("std_dev"), 2) if ps.get("std_dev") is not None else "N/A"
-                srel_val = ps.get("srel")
-                srel = (_non_negative_display(srel_val, 2) + "%") if srel_val is not None else "N/A"
-                row = [pname, c, m, mx, mn, r, sabs, srel]
-                row_line = " | ".join(str(v).ljust(10) for v in row)
+                row = [
+                    pname,
+                    _format_stat_count(ps.get("count")),
+                    _format_stat_number(ps.get("mean")),
+                    _format_stat_number(ps.get("max")),
+                    _format_stat_number(ps.get("min")),
+                    _format_stat_number(ps.get("range")),
+                    _format_stat_number(ps.get("std_dev")),
+                    _format_stat_rsd(ps.get("srel")),
+                ]
+                row_line = _join_fixed_width_row(row, stat_widths, {0})
                 lines.append(row_line)
             lines.append("")
             lines.append(sep)  # Separator line after statistics
         lines.append("")
 
-    # Operator
-    op_name = test_data.get("operatorName") or test_data.get("operatedBy") or "N/A"
-    emp_id = test_data.get("employeeId") or test_data.get("operatorId") or "N/A"
-    lines.append(f"Operated by: {op_name}")
-    lines.append(f"Employee ID: {emp_id}")
-    lines.append("")
+    op_name = report_data.get("operatorName") or test_data.get("operatorName") or test_data.get("operatedBy") or "--"
+    emp_id = report_data.get("employeeId") or test_data.get("employeeId") or test_data.get("operatorId") or "--"
+    approved_by = _approved_by_display_name(report_data.get("approvedBy"))
+    approved_by_emp = (
+        report_data.get("approvedByEmployeeId")
+        or report_data.get("approvedByUsername")
+        or "--"
+    )
+    approval_pf = report_data.get("approvalPassFail", "--")
+    approval_remarks = report_data.get("approvalRemarks", "") or "N/A"
+    approved_at = _format_ts_readable(report_data.get("approvedAt"))
 
-    # Remarks section (thermal and A4)
-    lines.append("Remarks:")
-    lines.append("")
-    lines.append("Approved by:")
-    lines.append("")
-    lines.append("")
-
-    # Footer (same timestamp as preview "Generated" / test end)
-    lines.append(sep)
-    lines.append(f"Generated: {_format_ts_readable(ts_end_raw)}")
-    lines.append(sep)
+    if thermal:
+        lines.extend(
+            [
+                "",
+                "APPROVAL",
+                f"Operated by: {op_name}",
+                f"Employee ID: {emp_id}",
+                f"Approved By: {approved_by}",
+                f"Employee ID: {approved_by_emp}",
+                f"Approval Result: {approval_pf}",
+                f"Approved At: {approved_at}",
+                f"Approval Remarks: {approval_remarks}",
+            ]
+        )
+    else:
+        lines.append("")
+        lines.append("APPROVAL")
+        lines.append(dash_sep)
+        _append_two_column_pairs(
+            lines,
+            [
+                ("Operated by", op_name),
+                ("Employee ID", emp_id),
+                ("Approved By", approved_by),
+                ("Employee ID", approved_by_emp),
+                ("Approval Result", approval_pf),
+                ("Approved At", approved_at),
+                ("Approval Remarks", _truncate_with_ellipsis(approval_remarks, max(16, width - 20))),
+            ],
+            width,
+        )
 
     if thermal:
         lines.append("")
