@@ -97,6 +97,18 @@ function resetDistanceValidationSession() {
     distanceValidationResultData = null;
 }
 
+/** Leave distance validation and always home the axis (T,HOME* via backend). */
+function abortDistanceValidationAndGoBack(targetPage) {
+    targetPage = targetPage || 'validate-type-select';
+    (typeof apiRequest === 'function' ? apiRequest : fetch)(
+        '/api/hardware/test/home',
+        { method: 'POST' }
+    ).catch(function () {});
+    resetDistanceValidationSession();
+    if (typeof window !== 'undefined') window._userAbortedOperation = false;
+    navigateValCalHub(targetPage);
+}
+
 function clearValidationCalibrationRunning() {
     window._userAbortedOperation = true;
     softClearValCalRunningFlags();
@@ -446,6 +458,11 @@ function stopValidationAndBack() {
     loadValidationRunning = false;
     stopLoadValidationSSE();
     fetch('/api/hardware/validation/load/stop', { method: 'POST' }).catch(function () {});
+    // Also home the axis when leaving load (weight) validation mid-session.
+    (typeof apiRequest === 'function' ? apiRequest : fetch)(
+        '/api/hardware/test/home',
+        { method: 'POST' }
+    ).catch(function () {});
     navigateValCalHub('validate-type-select');
 }
 
@@ -989,7 +1006,7 @@ function confirmCalibrationDue(months) {
     var cb = _calibrationDueCallback;
 
     function finishDueModal() {
-        console.log('[DEBUG] Pending due dates stashed, executing callback');
+        console.log('[DEBUG] Calibration due date saved, executing callback');
         closeCalibrationDueModal();
         if (typeof window !== 'undefined') {
             window._userAbortedOperation = false;
@@ -1001,11 +1018,6 @@ function confirmCalibrationDue(months) {
         }
     }
 
-    // Stash on report only — dates persist to factory settings on approval Pass.
-    if (reportId == null) {
-        finishDueModal();
-        return;
-    }
     var headers = { 'Content-Type': 'application/json' };
     try {
         var u = (typeof window !== 'undefined' && window.currentUser) ? window.currentUser : null;
@@ -1015,24 +1027,47 @@ function confirmCalibrationDue(months) {
             if (u.username) headers['X-User-Username'] = u.username;
         }
     } catch (eHdr) { /* ignore */ }
-    fetch('/api/data/reports/' + reportId + '/pending-due', {
+
+    // Persist dates via dedicated route (never POST /factory-settings — that audits as Factory settings changed).
+    var datesBody = {
+        lastValidationDate: lastFormatted,
+        nextValidationDate: nextFormatted
+    };
+    var datesReq = fetch('/api/data/factory-settings/validation-dates', {
         method: 'POST',
         headers: headers,
-        body: JSON.stringify({
-            months: months,
-            lastValidationDate: lastFormatted,
-            nextValidationDate: nextFormatted
-        })
-    }).then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
-      .then(function (res) {
+        body: JSON.stringify(datesBody)
+    }).then(function (r) {
+        return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+    });
+
+    // Optionally stash on report for approval Pass path (no Factory Settings audit).
+    var stashReq = Promise.resolve({ ok: true });
+    if (reportId != null) {
+        stashReq = fetch('/api/data/reports/' + reportId + '/pending-due', {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify({
+                months: months,
+                lastValidationDate: lastFormatted,
+                nextValidationDate: nextFormatted
+            })
+        }).then(function (r) {
+            return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+        }).catch(function () { return { ok: false }; });
+    }
+
+    datesReq.then(function (res) {
         if (!res.ok) {
-            throw new Error((res.data && res.data.error) || 'Failed to stash due date');
+            throw new Error((res.data && (res.data.error || res.data.message)) || 'Failed to save due date');
         }
+        return stashReq;
+    }).then(function () {
         finishDueModal();
-      }).catch(function (e) {
-        console.error('[DEBUG] Failed to stash calibration due date:', e);
+    }).catch(function (e) {
+        console.error('[DEBUG] Failed to save calibration due date:', e);
         kioskAlert('Failed to save next validation interval: ' + (e.message || 'Unknown error'));
-      });
+    });
 }
 
 function formatDateForDisplay(isoDate) {

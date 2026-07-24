@@ -739,7 +739,7 @@ function reapplyReportPreviewLockIfNeeded() {
     var rid = window._reportApprovalGate.reportId;
     if (rid == null) return;
     var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
-    apiRequest(base + '/api/reports/' + rid + '/preview').then(function (data) {
+    apiRequest(base + '/api/reports/' + rid + '/preview?silent=1').then(function (data) {
         if (!data || !data.preview) return;
         window._lastReportPreview = data.preview;
         if (typeof currentReportId !== 'undefined') currentReportId = rid;
@@ -771,7 +771,7 @@ function startReportApprovalPollIfLocked() {
             stopReportApprovalPoll();
             return;
         }
-        apiRequest(API_BASE + '/api/reports/' + rid + '/preview').then(function (data) {
+        apiRequest(API_BASE + '/api/reports/' + rid + '/preview?silent=1').then(function (data) {
             if (!data || !data.preview) return;
             var st = String(data.preview.reportApprovalStatus || '').trim().toLowerCase();
             if (st === 'approved') {
@@ -1076,6 +1076,18 @@ function finishTestRunReportSaved(reportId) {
         goToPage('reports');
         if (typeof loadReports === 'function') loadReports();
     }
+}
+
+/** Recipe disable: verifier must have Recipe management permission card. */
+function _approvalVerifyModalOptionsForRecipeDisable() {
+    return {
+        purpose: 'recipe_disable',
+        titleText: 'Recipe disable approval required',
+        subtitleText: 'Enter credentials for a user with Recipe management permission.',
+        usernameLabelText: 'Approver username',
+        usernamePlaceholder: 'Approver username',
+        emptyCredentialsMessage: 'Enter approver username and password.'
+    };
 }
 
 /** Recipe approval modal copy; verifier must have recipe-approve permission card. */
@@ -1596,7 +1608,7 @@ function approveReportWithVerifier(reportId, passFail, remarks, verifyMethod) {
             setReportApproveVerifyError(msg);
             return Promise.resolve(null);
         }
-        return apiRequest(API_BASE + '/api/reports/' + reportId + '/preview').then(function (prevData) {
+        return apiRequest(API_BASE + '/api/reports/' + reportId + '/preview?silent=1').then(function (prevData) {
             var preview = prevData && prevData.preview;
             if (typeof handleReportApprovalNoLongerPending === 'function') {
                 handleReportApprovalNoLongerPending(

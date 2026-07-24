@@ -881,6 +881,17 @@ function _friendlyExportError(err) {
     if (err && err.message) raw = String(err.message);
     else if (typeof err === 'string') raw = err;
     var t = raw.toLowerCase();
+    // Do not mask approval / permission failures as pendrive format errors.
+    if (
+        t.indexOf('approval') !== -1 ||
+        t.indexOf('verification') !== -1 ||
+        t.indexOf('verifier') !== -1 ||
+        t.indexOf('forbidden') !== -1 ||
+        t.indexOf('permission') !== -1 ||
+        t.indexOf('unauthorized') !== -1
+    ) {
+        return raw || 'Export approval is required.';
+    }
     if (t.indexOf('no external pendrive') !== -1 || t.indexOf('not detected') !== -1) {
         return 'No external pendrive detected. Please connect a USB pendrive and try again.';
     }
@@ -892,6 +903,9 @@ function _friendlyExportError(err) {
     }
     if (t.indexOf('disk full') !== -1 || t.indexOf('no space') !== -1) {
         return 'Pendrive is full. Free space or use a different pendrive.';
+    }
+    if (t.indexOf('pending') !== -1 && t.indexOf('approv') !== -1) {
+        return raw;
     }
     return 'Failed to export. Please format the pendrive (FAT32 or exFAT) and try again.';
 }

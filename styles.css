@@ -105,9 +105,9 @@ body {
     background: var(--bg-primary);
     z-index: 100;
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: center;
-    padding-top: 38px;
+    padding-top: 0;
     box-sizing: border-box;
     overflow: hidden;
     animation: fadeIn 0.5s ease-out;

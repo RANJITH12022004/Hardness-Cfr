@@ -492,6 +492,16 @@ def _startup_session_power_audit():
                     timestamp_ms=audit_time.get("timestamp_ms"),
                     date_time=audit_time.get("date_time"),
                 )
+                # Seed debounce so a near-simultaneous session-ui-reset does not double-log.
+                try:
+                    key = (un or "--").strip().lower()
+                    last_map = getattr(app, "_last_power_interrupt_logout_ms", None)
+                    if not isinstance(last_map, dict):
+                        last_map = {}
+                    last_map[key] = int(time.time() * 1000)
+                    app._last_power_interrupt_logout_ms = last_map
+                except Exception:
+                    pass
                 pending = dict(pending)
                 pending["powerAuditLogged"] = True
                 data_service.write_session_power_audit_pending(pending)
@@ -1354,8 +1364,8 @@ def create_recipe():
 @app.route("/api/data/recipes/disabled", methods=["GET"])
 def get_disabled_recipes():
     try:
-        gate = _require_session_internal(
-            "disable-recipes",
+        gate = _require_any_session_internal(
+            ["disable-recipes", "recipe-manage", "recipe-enable", "recipe-delete"],
             "Forbidden. You do not have permission to view disabled recipes.",
         )
         if gate:
@@ -1809,23 +1819,12 @@ def approve_report(report_id):
         rtype = (report.get("type") or "").strip().lower()
         if pf == "PASS" and rtype in ("validation", "calibration"):
             try:
+                # Due dates are already persisted + audited at confirmCalibrationDue
+                # ("Calibration due date set"). Re-apply stash silently if needed; no second audit.
                 applied = report_service.apply_pending_validation_due_dates(report)
-                if applied:
-                    _audit(
-                        None,
-                        None,
-                        "Validation due dates updated",
-                        "last={} next={} | months={} | report {}".format(
-                            applied.get("lastValidationDate") or "--",
-                            applied.get("nextValidationDate") or "--",
-                            applied.get("months") or "--",
-                            report_id,
-                        ),
-                    )
-                    # Clear stash so re-approve paths do not re-apply
-                    if report.get("pendingValidationDue") is not None:
-                        report.pop("pendingValidationDue", None)
-                        data_service.save_report(report)
+                if applied and report.get("pendingValidationDue") is not None:
+                    report.pop("pendingValidationDue", None)
+                    data_service.save_report(report)
             except Exception:
                 app.logger.exception("Failed to apply pending validation due dates after approval")
         if pdf_ok:
@@ -2359,24 +2358,14 @@ def save_factory_settings():
             if before.get(key) != saved.get(key):
                 changed.append(key)
         non_date_changed = [k for k in changed if k not in date_keys]
-        date_changed = [k for k in changed if k in date_keys]
+        # Defense in depth: date-only writes must never look like Factory Settings edits.
+        # Use POST /api/data/factory-settings/validation-dates for due-date audits.
         if non_date_changed:
             _audit(
                 None,
                 None,
                 "Factory settings changed",
                 "Changed: {}".format(", ".join(sorted(non_date_changed))),
-            )
-        elif date_changed:
-            # Dates-only writes via this route (legacy); prefer validation-dates API.
-            _audit(
-                None,
-                None,
-                "Validation due dates updated",
-                "last={} next={}".format(
-                    saved.get("lastValidationDate") or "--",
-                    saved.get("nextValidationDate") or "--",
-                ),
             )
         return jsonify({"success": True, "settings": saved}), 200
     except Exception as e:
@@ -2410,10 +2399,8 @@ def save_validation_due_dates():
             _audit(
                 None,
                 None,
-                "Validation due dates updated",
-                "last {} -> {} | next {} -> {}".format(
-                    before_last or "--", last, before_next or "--", nxt
-                ),
+                "Calibration due date set",
+                "Last: {} | Next: {}".format(last, nxt),
             )
         saved = data_service.get_factory_settings() or {}
         return jsonify({
@@ -2847,6 +2834,19 @@ def _audit_session_logout(user, reason, *, request_source=None):
     role = (user.get("role") or "").strip()
     reason = str(reason or "user").strip().lower()
     src = request_source or _audit_request_source()
+    # Skip duplicate Power interruption logout for same user within ~2s
+    # (startup pending + session-ui-reset / parallel callers).
+    if reason == "power_interruption":
+        now_ms = int(time.time() * 1000)
+        key = (un or "--").strip().lower()
+        last_map = getattr(app, "_last_power_interrupt_logout_ms", None)
+        if not isinstance(last_map, dict):
+            last_map = {}
+        prev = int(last_map.get(key) or 0)
+        if prev and (now_ms - prev) <= 2000:
+            return
+        last_map[key] = now_ms
+        app._last_power_interrupt_logout_ms = last_map
     if audit_service.is_hidden_factory_actor(un, role):
         audit_time = _audit_time_fields()
         if reason == "power_interruption":
@@ -4063,9 +4063,13 @@ def get_report_preview(report_id):
         if not report:
             return jsonify({"error": "Report not found"}), 404
         rtype = (report.get("type") or "").strip().lower() or "report"
-        # Audit intentional opens only (polls and silent refreshes pass audit=0 / omit).
+        # Audit intentional opens only. Polls / silent refresh use silent=1 or omit audit=1.
+        silent_flag = str(request.args.get("silent") or "0").strip().lower()
+        silent = silent_flag in ("1", "true", "yes") or (
+            str(request.headers.get("X-Audit-Silent") or "").strip() == "1"
+        )
         audit_flag = str(request.args.get("audit") or "0").strip().lower()
-        if audit_flag in ("1", "true", "yes"):
+        if (not silent) and audit_flag in ("1", "true", "yes"):
             _audit(
                 None,
                 None,

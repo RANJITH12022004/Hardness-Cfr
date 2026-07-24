@@ -201,7 +201,7 @@ function initHardwareStream() {
                         ['Thickness', 'Diameter', 'Width', 'Length', 'Hardness', 'Weight'].forEach(function (key) {
                             if (meas[key] && meas[key].length > 0) stats[key] = computeParamStatistics(meas[key]);
                         });
-                        if (typeof saveReport === 'function') {
+                        if (typeof saveReport === 'function' && claimTestRunReportSave()) {
                             saveReport({
                                 type: 'test',
                                 name: (r.productName || 'Test') + ' - ' + (r.batchNumber || r.batch || 'N/A'),
@@ -232,6 +232,7 @@ function initHardwareStream() {
                                     showBackoffModalWithReportId(reportId, recipeSnap);
                                 })
                                 .catch(function () {
+                                    resetTestRunReportSaveGate();
                                     if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
                                     showBackoffModalWithReportId(null, recipeSnap);
                                 });
@@ -417,15 +418,23 @@ function goToPage(pageName) {
         refreshValidatePageAccess();
     }
 
-    // Cleanup validation state when navigating away from load-validation
+    // Cleanup validation state when navigating away from active val/cal screens
     const activePage = document.querySelector('.page.active');
+    if (activePage && activePage.id === 'page-distance-validation' && pageName !== 'distance-validation') {
+        // Leaving distance validation: home axis (covers any navigation path, not only Back).
+        (typeof apiRequest === 'function' ? apiRequest : fetch)('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
+        if (typeof resetDistanceValidationSession === 'function') resetDistanceValidationSession();
+        else if (typeof clearValidationCalibrationRunning === 'function') clearValidationCalibrationRunning();
+    }
+    if (activePage && activePage.id === 'page-distance-validation-result' && pageName !== 'distance-validation-result' && pageName !== 'distance-validation') {
+        (typeof apiRequest === 'function' ? apiRequest : fetch)('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
+        if (typeof resetDistanceValidationSession === 'function') resetDistanceValidationSession();
+    }
     if (activePage && activePage.id === 'page-load-validation' && pageName !== 'load-validation') {
         if (typeof stopLoadValidationSSE === 'function') stopLoadValidationSSE();
         if (typeof fetch === 'function') fetch('/api/hardware/validation/load/stop', { method: 'POST' }).catch(function () {});
-    }
-    if (activePage && activePage.id === 'page-distance-validation' && pageName !== 'distance-validation') {
-        if (typeof resetDistanceValidationSession === 'function') resetDistanceValidationSession();
-        else if (typeof clearValidationCalibrationRunning === 'function') clearValidationCalibrationRunning();
+        (typeof apiRequest === 'function' ? apiRequest : fetch)('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
+        if (typeof loadValidationRunning !== 'undefined') loadValidationRunning = false;
     }
     if (activePage && (activePage.id === 'page-load-calibration' || activePage.id === 'page-distance-zero-calibration')) {
         if (pageName !== 'load-calibration' && pageName !== 'distance-zero-calibration') {
@@ -657,6 +666,18 @@ function goBack() {
         goToPage('reports');
     } else if (pageId === 'page-factory-settings') {
         goToPage('settings');
+    } else if (pageId === 'page-distance-validation' || pageId === 'page-distance-validation-result') {
+        if (typeof abortDistanceValidationAndGoBack === 'function') {
+            abortDistanceValidationAndGoBack('validate-type-select');
+        } else {
+            goToPage('validate-type-select');
+        }
+    } else if (pageId === 'page-load-validation') {
+        if (typeof stopValidationAndBack === 'function') {
+            stopValidationAndBack();
+        } else {
+            goToPage('validate-type-select');
+        }
     } else if (pageId === 'page-load-calibration' || pageId === 'page-distance-zero-calibration') {
         if (typeof abortCalibrationAndGoBack === 'function') {
             abortCalibrationAndGoBack('calibration-type-select');
@@ -1958,6 +1979,255 @@ function exportSuccessUserMessage(result, reportsPhrase) {
     return msg;
 }
 
+function _summariseExportResult(result) {
+    var count = result && typeof result.count === 'number' ? result.count : 0;
+    var fails = result && result.failed && result.failed.length ? result.failed.length : 0;
+    if (count > 0 && !fails) {
+        return count === 1
+            ? 'Report export successful.'
+            : count + ' reports exported successfully.';
+    }
+    if (count > 0 && fails) {
+        return count + ' exported, ' + fails + ' failed.';
+    }
+    return 'Export completed with no files written.';
+}
+
+/**
+ * TapDensity-parity USB report export:
+ * approval page → pendrive pick → NDJSON stream with verify token.
+ */
+function _exportReportsWithFlow(reportIds, opts) {
+    var ids = (reportIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return !isNaN(x) && x > 0; });
+    if (!ids.length) {
+        if (typeof showAppModal === 'function') showAppModal('No reports selected to export.', 'Export');
+        else kioskAlert('No reports selected to export.');
+        return Promise.resolve(null);
+    }
+    var u = window.currentUser;
+    if (typeof userCanExportToUsb === 'function' && !userCanExportToUsb(u)) {
+        if (typeof showAppModal === 'function') showAppModal('You do not have permission to export reports to USB.', 'Export');
+        else kioskAlert('You do not have permission to export reports to USB.');
+        return Promise.resolve(null);
+    }
+    var role = typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '';
+    var titleText = (opts && opts.title) ? opts.title : 'Export';
+    var base = (typeof API_BASE !== 'undefined' && API_BASE) ? API_BASE : '';
+
+    if (typeof beginKioskExportGuard === 'function') beginKioskExportGuard();
+
+    function endGuard() {
+        if (typeof endKioskExportGuard === 'function') endKioskExportGuard();
+    }
+
+    function showErr(msg) {
+        var text = typeof _friendlyExportError === 'function' ? _friendlyExportError(msg) : String(msg || 'Export failed.');
+        if (typeof showAppModal === 'function') showAppModal(text, titleText);
+        else if (typeof showModalCompat === 'function') showModalCompat(text, titleText);
+        else kioskAlert(text);
+    }
+
+    var ensureToken = (typeof _ensureExportApprovalToken === 'function')
+        ? _ensureExportApprovalToken()
+        : Promise.resolve('');
+
+    return ensureToken.then(function (token) {
+        if (role !== 'factory' && !token) {
+            endGuard();
+            showErr('Export cancelled — approval is required.');
+            return null;
+        }
+        var exportHeaders = token ? { 'X-Approval-Verify-Token': token } : {};
+        if (typeof showLoadingOverlay === 'function') {
+            showLoadingOverlay(titleText, 'Detecting external pendrive...', { cancellable: false });
+        }
+        return apiRequest(base + '/api/usb/list').then(function (data) {
+            var devices = (data && data.devices) ? data.devices : [];
+            if (!devices.length) {
+                if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+                endGuard();
+                showErr('No external pendrive detected. Please connect a USB pendrive and try again.');
+                return null;
+            }
+            var pickPromise;
+            if (devices.length === 1) {
+                pickPromise = Promise.resolve(devices[0].path);
+            } else if (typeof pickPendrive === 'function') {
+                if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+                pickPromise = pickPendrive(devices);
+            } else {
+                if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+                endGuard();
+                showErr('Multiple pendrives detected. Connect only one and try again.');
+                return null;
+            }
+            return pickPromise.then(function (devicePath) {
+                if (!devicePath) {
+                    endGuard();
+                    return null;
+                }
+                if (typeof showLoadingOverlay === 'function') {
+                    showLoadingOverlay(titleText, 'Exporting reports...', { cancellable: false, progress: true });
+                }
+                if (typeof setLoadingProgress === 'function') {
+                    setLoadingProgress(0, 'Starting export...', '');
+                }
+                // Stage batch for 24h retention tracking (optional; stream confirms on success).
+                return apiRequest(base + '/api/reports/export/stage', {
+                    method: 'POST',
+                    body: { report_ids: ids }
+                }).catch(function () {
+                    return null;
+                }).then(function (stageRes) {
+                    var batchId = stageRes && (stageRes.batchId || stageRes.batch_id);
+                    var payload = { report_ids: ids, device_path: devicePath };
+                    if (batchId) payload.batch_id = batchId;
+                    return _streamExportReports(payload, titleText, exportHeaders);
+                });
+            });
+        });
+    }).catch(function (err) {
+        if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+        endGuard();
+        showErr(err);
+        return null;
+    }).then(function (result) {
+        endGuard();
+        return result;
+    });
+}
+
+function _streamExportReports(payload, titleText, exportHeaders) {
+    var base = (typeof API_BASE !== 'undefined' && API_BASE) ? API_BASE : '';
+    var hdrs = { 'Content-Type': 'application/json' };
+    if (exportHeaders && exportHeaders['X-Approval-Verify-Token']) {
+        hdrs['X-Approval-Verify-Token'] = exportHeaders['X-Approval-Verify-Token'];
+    }
+    return fetch(base + '/api/reports/export/stream', {
+        method: 'POST',
+        headers: hdrs,
+        credentials: 'same-origin',
+        body: JSON.stringify(payload)
+    }).then(function (resp) {
+        if (!resp.ok && resp.status !== 200) {
+            return resp.json().catch(function () { return {}; }).then(function (j) {
+                throw new Error((j && j.error) || ('HTTP ' + resp.status));
+            });
+        }
+        if (!resp.body || !resp.body.getReader) {
+            return resp.text().then(function (txt) {
+                return _consumeNdjsonText(txt, titleText);
+            });
+        }
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder('utf-8');
+        var buffer = '';
+        var lastEvent = null;
+        function pump() {
+            return reader.read().then(function (r) {
+                if (r.done) {
+                    if (buffer.trim()) {
+                        try {
+                            lastEvent = JSON.parse(buffer);
+                            _handleExportEvent(lastEvent, titleText);
+                        } catch (e) { /* trailing partial */ }
+                    }
+                    return lastEvent;
+                }
+                buffer += decoder.decode(r.value, { stream: true });
+                var idx;
+                while ((idx = buffer.indexOf('\n')) >= 0) {
+                    var line = buffer.slice(0, idx).trim();
+                    buffer = buffer.slice(idx + 1);
+                    if (!line) continue;
+                    try {
+                        var evt = JSON.parse(line);
+                        lastEvent = evt;
+                        _handleExportEvent(evt, titleText);
+                    } catch (e) { /* skip malformed line */ }
+                }
+                return pump();
+            });
+        }
+        return pump();
+    }).catch(function (err) {
+        if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+        var text = typeof _friendlyExportError === 'function' ? _friendlyExportError(err) : String((err && err.message) || err || 'Export failed.');
+        if (typeof showAppModal === 'function') showAppModal(text, titleText);
+        else kioskAlert(text);
+        return null;
+    });
+}
+
+function _consumeNdjsonText(text, titleText) {
+    var lines = String(text || '').split('\n');
+    var last = null;
+    for (var i = 0; i < lines.length; i++) {
+        var s = lines[i].trim();
+        if (!s) continue;
+        try {
+            var evt = JSON.parse(s);
+            last = evt;
+            _handleExportEvent(evt, titleText);
+        } catch (e) {}
+    }
+    return last;
+}
+
+function _handleExportEvent(evt, titleText) {
+    if (!evt || typeof evt !== 'object') return;
+    var ev = evt.event;
+    if (ev === 'start') {
+        if (typeof setLoadingProgress === 'function') {
+            setLoadingProgress(0, 'Starting export of ' + (evt.total || '?') + ' report(s)...', '');
+        }
+        return;
+    }
+    if (ev === 'stage') {
+        if (typeof setLoadingProgress === 'function') {
+            setLoadingProgress(
+                typeof evt.percent === 'number' ? evt.percent : null,
+                evt.message || ('Stage: ' + evt.stage),
+                ''
+            );
+        }
+        return;
+    }
+    if (ev === 'report') {
+        var detail = 'Report ' + evt.current + ' of ' + evt.total + ' — ' + (evt.status || '');
+        if (typeof setLoadingProgress === 'function') {
+            setLoadingProgress(
+                typeof evt.percent === 'number' ? evt.percent : null,
+                evt.message || ('Exporting report ' + evt.current + ' of ' + evt.total + '...'),
+                detail
+            );
+        }
+        return;
+    }
+    if (ev === 'done') {
+        if (typeof setLoadingProgress === 'function') setLoadingProgress(100, 'Export complete', '');
+        setTimeout(function () {
+            if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+            var msg = _summariseExportResult(evt);
+            if (evt.export_directory) msg += '\n' + evt.export_directory;
+            if (typeof showAppModal === 'function') showAppModal(msg, titleText);
+            else kioskAlert(msg);
+            if (typeof loadReports === 'function') {
+                loadReports(typeof currentReportFilter !== 'undefined' ? currentReportFilter : null);
+            }
+        }, 350);
+        return;
+    }
+    if (ev === 'error') {
+        if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+        var text = typeof _friendlyExportError === 'function'
+            ? _friendlyExportError(evt.message || 'Export failed.')
+            : String(evt.message || 'Export failed.');
+        if (typeof showAppModal === 'function') showAppModal(text, titleText);
+        else kioskAlert(text);
+    }
+}
+
 async function exportFilteredReports() {
     if (currentReportFilter === 'audit') {
         if (typeof exportAuditTrails === 'function') {
@@ -1965,33 +2235,40 @@ async function exportFilteredReports() {
         }
         return;
     }
-    var reports = await getReports();
-    if (currentReportFilter !== 'all') {
-        reports = reports.filter(function (r) { return (r.type || 'test') === currentReportFilter; });
+    var filter = currentReportFilter || 'all';
+    if (typeof showLoadingOverlay === 'function') {
+        showLoadingOverlay('Export Reports', 'Loading report list...', { cancellable: false });
     }
-    if (reports.length === 0) {
-        kioskAlert('No reports to export.');
-        return;
-    }
-    var ids = reports.map(function (r) { return r.id; }).filter(function (id) { return id != null; });
-    if (ids.length === 0) {
-        kioskAlert('No report IDs to export.');
-        return;
-    }
-    beginKioskExportGuard();
     try {
-        var pdfHtmlById = await buildPdfHtmlByIdMap(ids);
-        if (!pdfHtmlById) return;
-        var expResult = await apiRequest('/api/reports/export', {
-            method: 'POST',
-            body: JSON.stringify({ report_ids: ids, pdf_html_by_id: pdfHtmlById })
-        });
-        kioskAlert(exportSuccessUserMessage(expResult, ids.length + ' report(s)'));
+        var reports = await getReports();
+        if (filter !== 'all' && filter !== 'audit') {
+            reports = reports.filter(function (r) { return (r.type || 'test') === filter; });
+        }
+        var ids = reports.map(function (r) { return r.id; }).filter(function (id) { return id != null; });
+        if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+        if (!ids.length) {
+            if (typeof showAppModal === 'function') showAppModal('No reports to export.', 'Export Reports');
+            else kioskAlert('No reports to export.');
+            return;
+        }
+        var confirmFn = (typeof showConfirmModal === 'function')
+            ? showConfirmModal
+            : (typeof showConfirmModalCompat === 'function' ? showConfirmModalCompat : null);
+        var proceed = true;
+        if (confirmFn) {
+            proceed = await confirmFn(
+                'Export ' + ids.length + ' report' + (ids.length === 1 ? '' : 's') +
+                ' to USB (filter: ' + filter + ')?',
+                'Export Reports'
+            );
+        }
+        if (!proceed) return;
+        await _exportReportsWithFlow(ids, { title: 'Export Reports' });
     } catch (e) {
-        var hint = '\n\nReports remain stored on the device; summary PDFs are in the reports folder if generation succeeded.';
-        kioskAlert('Export failed: ' + (e.message || 'Unknown error') + hint);
-    } finally {
-        endKioskExportGuard();
+        if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+        var msg = (e && e.message) ? e.message : 'Could not load reports.';
+        if (typeof showAppModal === 'function') showAppModal(msg, 'Export Reports');
+        else kioskAlert(msg);
     }
 }
 
@@ -2808,7 +3085,7 @@ function hideReportPreviewLoadingOverlayAfterRender() {
 function _saveReportPdfSilent(reportId) {
     var id = parseInt(reportId, 10);
     if (isNaN(id) || id < 1) return Promise.resolve(false);
-    return apiRequest(API_BASE + '/api/reports/' + id + '/preview').then(function (data) {
+    return apiRequest(API_BASE + '/api/reports/' + id + '/preview?silent=1').then(function (data) {
         var st = String((data && data.preview && data.preview.reportApprovalStatus) || '').trim().toLowerCase();
         if (st !== 'approved' && st !== 'aborted') return false;
         return apiRequest(API_BASE + '/api/reports/' + id + '/pdf', {
@@ -2828,9 +3105,15 @@ function resolveCreatedReportId(data) {
 function openReportPreview(reportId, options) {
     if (!reportId) return Promise.resolve();
     options = options || {};
+    var myGen = (++_openReportPreviewGen);
     if (options.setGate || options.bypassRbac) {
         window._navigatingAfterValidationCalibration = true;
         window._bypassReportPreviewRbacOnce = true;
+    }
+    // Abort / post-test opens must never be blocked by a leftover testRunActive lock.
+    if (options.setGate || options.bypassRbac) {
+        if (typeof unlockNavigation === 'function') unlockNavigation();
+        testRunActive = false;
     }
     var canOpen = true;
     if (!options.setGate && !options.bypassRbac) {
@@ -2850,11 +3133,13 @@ function openReportPreview(reportId, options) {
         showLoadingOverlay('Report Preview', 'Loading report preview...', { cancellable: false });
     }
     return apiRequest('/api/reports/' + reportId + '/preview?audit=1').then(async function (data) {
+        if (myGen !== _openReportPreviewGen) return; // superseded by a newer open
         if (data && data.preview) {
             currentReportId = reportId;
             window.currentReportId = reportId;
             currentReportData = null;
             await populateReportPreviewDom(data.preview);
+            if (myGen !== _openReportPreviewGen) return;
             if (options.setGate && typeof setReportApprovalGateFromPreview === 'function') {
                 setReportApprovalGateFromPreview(data.preview, reportId);
             }
@@ -2866,10 +3151,27 @@ function openReportPreview(reportId, options) {
                 window._bypassReportPreviewRbacOnce = true;
             }
             goToPage('report-preview');
+            // Guard against blank main area (no .page.active).
+            var active = document.querySelector('.page.active');
+            if (!active || active.id !== 'page-report-preview') {
+                var previewPage = document.getElementById('page-report-preview');
+                if (previewPage) {
+                    document.querySelectorAll('.page').forEach(function (p) { p.classList.remove('active'); });
+                    previewPage.classList.add('active');
+                    var app = document.querySelector('.app-container');
+                    if (app) app.style.display = '';
+                    var login = document.getElementById('page-login');
+                    if (login) { login.style.display = 'none'; login.classList.remove('active'); }
+                } else if (typeof goToPage === 'function') {
+                    goToPage('reports');
+                }
+            }
+            if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
             if (options.setGate && typeof startReportApprovalPollIfLocked === 'function') {
                 startReportApprovalPollIfLocked();
             }
             setTimeout(function () {
+                if (myGen !== _openReportPreviewGen) return;
                 if (typeof isReportPendingApproval === 'function' &&
                     isReportPendingApproval(data.preview) &&
                     typeof scrollReportPendingBannerIntoView === 'function') {
@@ -2886,8 +3188,10 @@ function openReportPreview(reportId, options) {
             }, 250);
         } else if (typeof showAppModal === 'function') {
             showAppModal('Report preview is not available.', 'Reports');
+            if (typeof goToPage === 'function') goToPage('reports');
         }
     }).catch(function (err) {
+        if (myGen !== _openReportPreviewGen) return;
         var msg = (err && err.message) ? String(err.message) : '';
         if (typeof showAppModal === 'function') {
             if (/permission|forbidden/i.test(msg)) {
@@ -2898,8 +3202,15 @@ function openReportPreview(reportId, options) {
                 showAppModal('Could not open report preview. Check your connection and try again from Reports.', 'Reports');
             }
         }
+        // Avoid leaving a cleared test-run page with no destination.
+        var activeFail = document.querySelector('.page.active');
+        if (!activeFail || activeFail.id === 'page-test-run') {
+            if (typeof goToPage === 'function') goToPage('reports');
+        }
     }).finally(function () {
-        hideReportPreviewLoadingOverlayAfterRender();
+        if (myGen === _openReportPreviewGen) {
+            hideReportPreviewLoadingOverlayAfterRender();
+        }
     });
 }
 
@@ -3304,26 +3615,18 @@ async function handlePrintThermal() {
 }
 
 async function handleExportReport() {
-    var id = currentReportId;
-    if (id == null) {
-        kioskAlert('No report selected to export.');
+    if (typeof reportActionsBlockedForPreview === 'function' && reportActionsBlockedForPreview()) {
+        if (typeof showAppModal === 'function') showAppModal('This report must be approved before export.', 'Export');
+        else kioskAlert('This report must be approved before export.');
         return;
     }
-    beginKioskExportGuard();
-    try {
-        var pdfHtmlById = await buildPdfHtmlByIdMap([id]);
-        if (!pdfHtmlById) return;
-        var result = await apiRequest('/api/reports/export', {
-            method: 'POST',
-            body: JSON.stringify({ report_ids: [id], pdf_html_by_id: pdfHtmlById })
-        });
-        kioskAlert(exportSuccessUserMessage(result, 'Report'));
-    } catch (e) {
-        var hint = '\n\nReports remain stored on the device; summary PDFs are in the reports folder if generation succeeded.';
-        kioskAlert('Export failed: ' + (e.message || 'Unknown error') + hint);
-    } finally {
-        endKioskExportGuard();
+    var id = currentReportId;
+    if (id == null) {
+        if (typeof showAppModal === 'function') showAppModal('No report selected to export.', 'Export');
+        else kioskAlert('No report selected to export.');
+        return;
     }
+    await _exportReportsWithFlow([id], { title: 'Export Report' });
 }
 
 // ===== UTILITY FUNCTIONS =====
@@ -3613,24 +3916,85 @@ async function getRecipes() {
     }
 }
 
-async function deleteRecipe(recipeId) {
-    // Check RBAC permission
-    if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
-        const role = getCurrentRole();
-        if (!canPerformAction(role, 'recipe-delete', 'delete')) {
-            kioskAlert('You do not have permission to delete recipes.');
-            return;
-        }
+async function disableRecipe(recipeId) {
+    var id = parseInt(recipeId, 10);
+    if (isNaN(id) || id < 1) return;
+
+    var u = window.currentUser;
+    var allowed = true;
+    if (typeof canAccess === 'function' && u) {
+        allowed = canAccess(u, 'recipe-manage') || canAccess(u, 'disable-recipes') || canAccess(u, 'recipe-delete');
+    } else if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
+        allowed = canPerformAction(getCurrentRole(), 'recipe-delete', 'delete') ||
+            canPerformAction(getCurrentRole(), 'disable-recipes', 'delete');
     }
-    
+    if (!allowed) {
+        if (typeof showAppModal === 'function') showAppModal('You do not have permission to disable recipes.', 'Permission');
+        else kioskAlert('You do not have permission to disable recipes.');
+        return;
+    }
+
+    var recipe = lastDisplayedRecipes && lastDisplayedRecipes.find(function (r) { return r.id === id; });
+    var label = (recipe && (recipe.productName || recipe.name)) ? (recipe.productName || recipe.name) : ('#' + id);
+    var confirmFn = (typeof showConfirmModal === 'function')
+        ? showConfirmModal
+        : (typeof showConfirmModalCompat === 'function' ? showConfirmModalCompat : null);
+    var ok = true;
+    if (confirmFn) {
+        ok = await confirmFn(
+            'Disable recipe "' + label + '"?\n\nIt will move to Settings → Disabled Recipes and can be enabled later.',
+            'Disable Recipe'
+        );
+    }
+    if (!ok) return;
+
+    var role = typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '';
+    var token = '';
     try {
-        await apiRequest(`/api/data/recipes/${recipeId}`, { method: 'DELETE' });
-        // Refresh the recipe list display
-        displayRecipeList();
+        if (role !== 'factory') {
+            if (typeof openApprovalVerifyModal !== 'function') {
+                if (typeof showAppModal === 'function') showAppModal('Approval verification UI is unavailable.', 'Disable Recipe');
+                else kioskAlert('Approval verification UI is unavailable.');
+                return;
+            }
+            var opts = (typeof _approvalVerifyModalOptionsForRecipeDisable === 'function')
+                ? _approvalVerifyModalOptionsForRecipeDisable()
+                : {
+                    purpose: 'recipe_disable',
+                    titleText: 'Recipe disable approval required',
+                    subtitleText: 'Enter credentials for a user with Recipe management permission.',
+                    usernameLabelText: 'Approver username',
+                    usernamePlaceholder: 'Approver username',
+                    emptyCredentialsMessage: 'Enter approver username and password.'
+                };
+            token = await openApprovalVerifyModal(opts);
+            if (!token) {
+                if (typeof showAppModal === 'function') showAppModal('Disable cancelled — approval is required.', 'Disable Recipe');
+                else kioskAlert('Disable cancelled — approval is required.');
+                return;
+            }
+        }
+        var headers = token ? { 'X-Approval-Verify-Token': token } : {};
+        await apiRequest('/api/data/recipes/' + id, {
+            method: 'DELETE',
+            headers: headers,
+            body: {}
+        });
+        if (typeof showAppModal === 'function') showAppModal('Recipe disabled. View it under Settings → Disabled Recipes.', 'Disable Recipe');
+        else kioskAlert('Recipe disabled.');
+        if (typeof displayRecipeList === 'function') displayRecipeList();
+        if (typeof loadDisableRecipes === 'function') loadDisableRecipes();
     } catch (e) {
-        console.error('Failed to delete recipe:', e);
-        kioskAlert('Failed to delete recipe: ' + e.message);
+        console.error('Failed to disable recipe:', e);
+        var msg = (e && e.message) ? String(e.message) : 'Failed to disable recipe.';
+        if (typeof showAppModal === 'function') showAppModal(msg, 'Disable Recipe');
+        else kioskAlert(msg);
     }
+}
+
+/** @deprecated Use disableRecipe — DELETE soft-disables; kept for older onclick handlers. */
+async function deleteRecipe(recipeId) {
+    return disableRecipe(recipeId);
 }
 
 async function displayRecipeList() {
@@ -3716,7 +4080,7 @@ async function displayRecipeList() {
             ? getEffectiveRecipeApprovalStatus(recipe) : 'pending';
         const apprLabel = apprStatus === 'pending' ? 'Pending' : 'Approved';
         const actionsBtnHtml = showActions ? `
-                    <button class="btn-action btn-actions" onclick="openRecipeActionsModal(${recipe.id})" title="Edit / Delete">
+                    <button class="btn-action btn-actions" onclick="openRecipeActionsModal(${recipe.id})" title="Edit / Disable">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="1"></circle>
                             <circle cx="12" cy="5" r="1"></circle>
@@ -3760,16 +4124,17 @@ function openRecipeActionsModal(recipeId) {
         apprBtn.style.display = showAppr ? '' : 'none';
     }
     var editBtn = document.getElementById('recipe-action-edit-btn');
-    var deleteBtn = document.getElementById('recipe-action-delete-btn');
+    var disableBtn = document.getElementById('recipe-action-disable-btn') ||
+        document.getElementById('recipe-action-delete-btn');
     var loadBtn = document.getElementById('recipe-action-load-btn');
     if (recipeListLoadOnly) {
         if (editBtn) editBtn.style.display = 'none';
-        if (deleteBtn) deleteBtn.style.display = 'none';
+        if (disableBtn) disableBtn.style.display = 'none';
         if (loadBtn) loadBtn.style.display = '';
     } else {
-        // Manage Recipe: Edit / Delete / Approve only — no Load (use Load Recipe for that).
+        // Manage Recipe: Edit / Disable / Approve only — no Load (use Load Recipe for that).
         if (editBtn) editBtn.style.display = '';
-        if (deleteBtn) deleteBtn.style.display = '';
+        if (disableBtn) disableBtn.style.display = '';
         if (loadBtn) loadBtn.style.display = 'none';
     }
     var overlay = document.getElementById('recipe-actions-modal-overlay');
@@ -3788,8 +4153,8 @@ function confirmRecipeAction(action) {
     if (id == null) return;
     if (action === 'edit') {
         editRecipe(id);
-    } else if (action === 'delete') {
-        deleteRecipe(id);
+    } else if (action === 'disable' || action === 'delete') {
+        disableRecipe(id);
     } else if (action === 'load') {
         loadRecipeById(id);
     } else if (action === 'approve') {
@@ -4119,6 +4484,22 @@ var testRunTotalSamples = 10;
 var testRunManualWaitingForStart = false;
 var testRunManualContinueResolve = null;
 var backoffAbortHandled = false;
+/** True when STOP / sample-failure already saved the aborted report (skip loop-end second save). */
+var userAbortReportHandled = false;
+/** Monotonic id so only the latest openReportPreview may navigate / hide overlay. */
+var _openReportPreviewGen = 0;
+/** One report save per test run (abort + loop-end must not both POST). */
+var _testRunReportSaved = false;
+
+function claimTestRunReportSave() {
+    if (_testRunReportSaved) return false;
+    _testRunReportSaved = true;
+    return true;
+}
+
+function resetTestRunReportSaveGate() {
+    _testRunReportSaved = false;
+}
 
 function clearHardnessTestRunCheckpoint() {
     var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
@@ -4209,6 +4590,9 @@ function startTestRun(recipe) {
     unlockNavigation();
     testRunPaused = false;
     testRunAborted = false;
+    userAbortReportHandled = false;
+    backoffAbortHandled = false;
+    resetTestRunReportSaveGate();
     testRunManualWaitingForStart = false;
     testRunManualContinueResolve = null;
     goToPage('test-run');
@@ -4815,6 +5199,20 @@ async function runHardnessTestLoop() {
     }
 
     testRunActive = false;
+
+    // Abort / backoff already HOMEd + saved — exit before a second HOME or second report.
+    if (typeof backoffAbortHandled !== 'undefined' && backoffAbortHandled) {
+        backoffAbortHandled = false;
+        return;
+    }
+    if (typeof userAbortReportHandled !== 'undefined' && userAbortReportHandled) {
+        userAbortReportHandled = false;
+        return;
+    }
+    if (typeof _testRunReportSaved !== 'undefined' && _testRunReportSaved) {
+        return;
+    }
+
     try {
         await apiRequest('/api/hardware/test/home', { method: 'POST' });
     } catch (e) {
@@ -4836,9 +5234,12 @@ async function runHardnessTestLoop() {
         }
     });
 
-    if (typeof backoffAbortHandled !== 'undefined' && backoffAbortHandled) {
+    // Re-check after HOME await — STOP may have claimed the save while we waited.
+    if ((typeof userAbortReportHandled !== 'undefined' && userAbortReportHandled) ||
+        (typeof backoffAbortHandled !== 'undefined' && backoffAbortHandled) ||
+        (typeof _testRunReportSaved !== 'undefined' && _testRunReportSaved)) {
+        userAbortReportHandled = false;
         backoffAbortHandled = false;
-        if (typeof clearHardnessTestRunCheckpoint === 'function') clearHardnessTestRunCheckpoint();
         return;
     }
 
@@ -4849,7 +5250,7 @@ async function runHardnessTestLoop() {
     });
     if (maxMeasLen > reportSampleSize) reportSampleSize = maxMeasLen;
 
-    if (lastTestRunRecipe && typeof saveReport === 'function') {
+    if (lastTestRunRecipe && typeof saveReport === 'function' && claimTestRunReportSave()) {
         var r = lastTestRunRecipe;
         saveReport({
             type: 'test',
@@ -4876,12 +5277,12 @@ async function runHardnessTestLoop() {
             recipe: Object.assign({}, r, { sampleSize: reportSampleSize })
         }).then(function (reportId) {
             if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
-            fetch('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
             handleTestReportSavedNavigation(reportId);
         }).catch(function (err) {
+            resetTestRunReportSaveGate();
             handleTestReportSaveFailure(err);
         });
-    } else {
+    } else if (!_testRunReportSaved) {
         if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
         if (typeof goToPage === 'function') goToPage('reports');
     }
@@ -4918,6 +5319,9 @@ function toggleTestRunState() {
         }
         testRunPaused = false;
         testRunAborted = false;
+        userAbortReportHandled = false;
+        backoffAbortHandled = false;
+        resetTestRunReportSaveGate();
         runHardnessTestLoop();
         console.log("Test Started");
     } else {
@@ -4926,15 +5330,22 @@ function toggleTestRunState() {
             testRunAborted = true;
             testRunActive = false;
             unlockNavigation();
+            userAbortReportHandled = true;
+            // Home axis immediately (backend → ESP T,HOME*).
             apiRequest('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
-            // Save report when test is stopped and navigate to it
-            if (lastTestRunRecipe && typeof saveReport === 'function') {
+            // Save report once here; runHardnessTestLoop will skip a second save via claim + flag.
+            if (lastTestRunRecipe && typeof saveReport === 'function' && claimTestRunReportSave()) {
                 var r = lastTestRunRecipe;
                 var meas = lastTestRunMeasurements || { Thickness: [], Diameter: [], Width: [], Length: [], Hardness: [], Weight: [] };
                 var stats = {};
                 ['Thickness', 'Diameter', 'Width', 'Length', 'Hardness', 'Weight'].forEach(function (key) {
                     if (meas[key] && meas[key].length > 0) stats[key] = computeParamStatistics(meas[key]);
                 });
+                var maxMeasLen = 0;
+                ['Thickness', 'Diameter', 'Width', 'Length', 'Hardness', 'Weight'].forEach(function (key) {
+                    if (meas[key] && meas[key].length > maxMeasLen) maxMeasLen = meas[key].length;
+                });
+                var reportSampleSize = maxMeasLen > 0 ? maxMeasLen : (parseInt(r.sampleSize, 10) || 0);
                 saveReport({
                     type: 'test',
                     name: (r.productName || 'Test') + ' - ' + (r.batchNumber || r.batch || 'N/A'),
@@ -4945,7 +5356,7 @@ function toggleTestRunState() {
                     parameterSamples: r.parameterSamples || {},
                     unit: r.unit,
                     conversionFactor: r.conversionFactor,
-                    sampleSize: r.sampleSize,
+                    sampleSize: reportSampleSize,
                     mode: r.mode || 'auto',
                     status: 'aborted',
                     measurements: meas,
@@ -4956,16 +5367,17 @@ function toggleTestRunState() {
                     isQuickTest: (typeof currentTest !== 'undefined' && currentTest === 'quick'),
                     testStartTime: testRunStartTime ? new Date(testRunStartTime).toISOString() : undefined,
                     testEndTime: new Date().toISOString(),
-                    durationSeconds: testRunStartTime ? Math.floor((Date.now() - testRunStartTime) / 1000) : undefined
+                    durationSeconds: testRunStartTime ? Math.floor((Date.now() - testRunStartTime) / 1000) : undefined,
+                    recipe: Object.assign({}, r, { sampleSize: reportSampleSize })
                 }).then(function (reportId) {
-                    if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
-                    fetch('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
                     handleTestReportSavedNavigation(reportId);
                 }).catch(function (err) {
+                    userAbortReportHandled = false;
+                    resetTestRunReportSaveGate();
                     handleTestReportSaveFailure(err);
                 });
-            } else {
-                if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
+            } else if (!_testRunReportSaved) {
+                userAbortReportHandled = false;
                 if (typeof goToPage === 'function') goToPage('reports');
             }
             // Reset to Start state
@@ -5115,8 +5527,19 @@ function confirmSampleFailureEnd() {
 function handleSampleFailureEndTest() {
     // Set abort flag to break out of test loop
     testRunAborted = true;
-    if (lastTestRunRecipe && typeof saveReport === 'function') {
+    testRunActive = false;
+    unlockNavigation();
+    userAbortReportHandled = true;
+    // Home axis immediately (backend → ESP T,HOME*).
+    apiRequest('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
+    if (lastTestRunRecipe && typeof saveReport === 'function' && claimTestRunReportSave()) {
         var r = lastTestRunRecipe;
+        var meas = lastTestRunMeasurements || {};
+        var maxMeasLen = 0;
+        ['Thickness', 'Diameter', 'Width', 'Length', 'Hardness', 'Weight'].forEach(function (key) {
+            if (meas[key] && meas[key].length > maxMeasLen) maxMeasLen = meas[key].length;
+        });
+        var reportSampleSize = maxMeasLen > 0 ? maxMeasLen : (parseInt(r.sampleSize, 10) || 0);
         saveReport({
             type: 'test',
             name: (r.productName || 'Test') + ' - ' + (r.batchNumber || r.batch || 'N/A'),
@@ -5128,22 +5551,22 @@ function handleSampleFailureEndTest() {
             unit: r.unit,
             distanceUnit: r.distanceUnit,
             weightUnit: r.weightUnit,
-            sampleSize: r.sampleSize,
+            sampleSize: reportSampleSize,
             status: 'aborted',
-            measurements: lastTestRunMeasurements || {},
+            measurements: meas,
             testStartTime: testRunStartTime ? new Date(testRunStartTime).toISOString() : undefined,
             testEndTime: new Date().toISOString(),
-            durationSeconds: testRunStartTime ? Math.floor((Date.now() - testRunStartTime) / 1000) : undefined
+            durationSeconds: testRunStartTime ? Math.floor((Date.now() - testRunStartTime) / 1000) : undefined,
+            recipe: Object.assign({}, r, { sampleSize: reportSampleSize })
         }).then(function (reportId) {
-            if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
-            fetch('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
             handleTestReportSavedNavigation(reportId);
         }).catch(function (err) {
+            userAbortReportHandled = false;
+            resetTestRunReportSaveGate();
             handleTestReportSaveFailure(err);
         });
-    } else {
-        // If no recipe, still navigate to reports
-        if (typeof clearTestRunDisplay === 'function') clearTestRunDisplay();
+    } else if (!_testRunReportSaved) {
+        userAbortReportHandled = false;
         if (typeof goToPage === 'function') goToPage('reports');
     }
     var btnAction = document.getElementById('btn-test-start-abort');
@@ -7068,8 +7491,12 @@ function updateSettingsVisibility() {
     var disableCard = document.querySelector('.settings-disable');
     if (disableCard) {
         var showDisable =
-            (u && typeof canAccess === 'function' && canAccess(u, 'disable-recipes')) ||
-            rl === 'factory';
+            rl === 'factory' ||
+            (u && typeof canAccess === 'function' && (
+                canAccess(u, 'disable-recipes') ||
+                canAccess(u, 'recipe-manage') ||
+                canAccess(u, 'recipe-enable')
+            ));
         disableCard.style.display = showDisable ? '' : 'none';
     }
     var valCard = document.querySelector('.settings-validation');
@@ -7247,12 +7674,13 @@ function enableDisabledRecipe(recipeId) {
             body: '{}'
         }).then(function (r) { return r.json().then(function (b) { if (!r.ok) throw new Error(b.error || 'Enable failed'); return b; }); });
     Promise.resolve(req).then(function (res) {
-        if (typeof showAppModal === 'function') showAppModal('Recipe re-enabled.', 'Recipes');
+        if (typeof showAppModal === 'function') showAppModal('Recipe re-enabled. It is available again under Manage Recipe.', 'Disabled Recipes');
         else kioskAlert('Recipe re-enabled.');
         loadDisableRecipes();
+        if (typeof displayRecipeList === 'function') displayRecipeList();
     }).catch(function (e) {
         var msg = (e && e.message) ? e.message : 'Enable failed';
-        if (typeof showAppModal === 'function') showAppModal(msg, 'Recipes');
+        if (typeof showAppModal === 'function') showAppModal(msg, 'Disabled Recipes');
         else kioskAlert(msg);
     });
 }

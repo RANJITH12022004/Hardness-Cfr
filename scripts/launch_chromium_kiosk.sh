@@ -42,11 +42,14 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 
-# Avoid opening a stack of kiosk windows if the desktop autostart runs twice.
+# If a stale Chromium for this URL is still dying/alive from a previous session,
+# kill it instead of exiting 0 (exiting made xinit tear down X → blank/half screen).
 if pgrep -f -- "${CHROME_BIN}.*--app=${KIOSK_URL%/}" >/dev/null 2>&1; then
-  exit 0
+  pkill -f -- "${CHROME_BIN}.*--app=${KIOSK_URL%/}" >/dev/null 2>&1 || true
+  sleep 1
+  pkill -9 -f -- "${CHROME_BIN}.*--app=${KIOSK_URL%/}" >/dev/null 2>&1 || true
+  sleep 0.5
 fi
-
 # kiosk-display.service runs X11 via startx — not Wayland. Chromium 144+ defaults to
 # Wayland/ozone and exits immediately if no Wayland compositor is present (blank screen
 # after power-on). Force X11 unless an operator explicitly overrides CHROMIUM_OZONE_PLATFORM.
@@ -60,13 +63,22 @@ OZONE_PLATFORM="${CHROMIUM_OZONE_PLATFORM:-x11}"
 # Do not inherit Debian wrapper flags that enable remote extensions / background net.
 unset CHROMIUM_FLAGS || true
 
-exec "$CHROME_BIN" \
+# Panel EDID reports ~173 DPI. Without an explicit scale factor Chromium can pick
+# ~1.75–2.0 and the fixed 1024×600 CSS UI only fills the top half of the window.
+# Also force the connected HDMI primary + true fullscreen geometry (RealVNC overlays
+# and a disconnected HDMI-1 marked primary previously left the window at 10,10 / 1023×599).
+if [[ -x /opt/kiosk/scripts/kiosk_fix_display.sh ]]; then
+  /bin/bash /opt/kiosk/scripts/kiosk_fix_display.sh || true
+fi
+
+"$CHROME_BIN" \
   --start-fullscreen \
   --noerrdialogs \
   --disable-infobars \
   --disable-pinch \
   --overscroll-history-navigation=0 \
   --force-device-scale-factor=1 \
+  --high-dpi-support=1 \
   --kiosk \
   --incognito \
   --no-first-run \
@@ -83,5 +95,26 @@ exec "$CHROME_BIN" \
   --ozone-platform-hint=x11 \
   --use-angle=gles \
   --disable-dev-shm-usage \
+  --window-position=0,0 \
   --window-size=1024,600 \
-  --app="${KIOSK_URL%/}"
+  --app="${KIOSK_URL%/}" &
+CHROME_PID=$!
+
+# Keep geometry correct while Chromium runs (VNC/status UI and hotplug can move it).
+(
+  for _ in $(seq 1 15); do
+    sleep 1
+    [[ -x /opt/kiosk/scripts/kiosk_fix_display.sh ]] && /bin/bash /opt/kiosk/scripts/kiosk_fix_display.sh || true
+    kill -0 "$CHROME_PID" 2>/dev/null || exit 0
+  done
+  while kill -0 "$CHROME_PID" 2>/dev/null; do
+    sleep 5
+    /bin/bash /opt/kiosk/scripts/kiosk_fix_display.sh || true
+  done
+) &
+WATCH_PID=$!
+
+wait "$CHROME_PID"
+EXIT_CODE=$?
+kill "$WATCH_PID" 2>/dev/null || true
+exit "$EXIT_CODE"

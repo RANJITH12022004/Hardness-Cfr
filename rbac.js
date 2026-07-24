@@ -78,7 +78,7 @@ var PERM_CARD_EXPAND = {
 var PERMISSION_CARD_CATALOG = [
   { key: 'perm_test_access', label: 'Test access', description: 'Quick test and recipe-based test runs.', accent: 0 },
   { key: 'perm_test_report_approve', label: 'Test report approval', description: 'Approve pending test reports.', accent: 1 },
-  { key: 'perm_recipe_manage', label: 'Manage recipes', description: 'Create and edit recipes.', accent: 2 },
+  { key: 'perm_recipe_manage', label: 'Manage recipes', description: 'Create, edit, disable, and re-enable recipes.', accent: 2 },
   { key: 'perm_recipe_approve', label: 'Recipe approval', description: 'Participate in recipe approval / verification.', accent: 3 },
   { key: 'perm_profile_admin', label: 'Profile management', description: 'Add, disable, edit, lock, unlock, and change roles for profiles.', accent: 4 },
   { key: 'perm_validation_test', label: 'Validation test access', description: 'Run distance and load validation procedures.', accent: 5 },

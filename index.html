@@ -17,9 +17,9 @@
         });
     </script>
     <link rel="stylesheet" href="base.css">
-    <link rel="stylesheet" href="layout.css?v=20260723l">
+    <link rel="stylesheet" href="layout.css?v=20260725a">
     <link rel="stylesheet" href="components.css?v=20260724m">
-    <link rel="stylesheet" href="styles.css?v=20260724m">
+    <link rel="stylesheet" href="styles.css?v=20260725a">
 </head>
 
 <body>
@@ -277,7 +277,7 @@
                                 </svg>
                             </div>
                             <h2>Manage Recipe</h2>
-                            <p>Create, edit, or delete test recipes</p>
+                            <p>Create, edit, or disable test recipes</p>
                         </div>
                     </div>
                 </div>
@@ -298,14 +298,14 @@
                             <p class="empty-state-message">No recipes created yet.</p>
                         </div>
 
-                        <!-- Recipe Actions Modal (Edit / Delete / Load) -->
+                        <!-- Recipe Actions Modal (Edit / Disable / Load) -->
                         <div id="recipe-actions-modal-overlay" class="modal-overlay" style="display: none;">
                             <div class="role-modal">
                                 <h3 id="recipe-actions-modal-title">Recipe</h3>
                                 <div class="role-modal-buttons">
                                     <button type="button" class="btn-role-select btn-role-qa" id="recipe-action-approve-btn" style="display: none;" onclick="confirmRecipeAction('approve')">Approve</button>
                                     <button type="button" class="btn-role-select btn-role-admin" id="recipe-action-edit-btn" onclick="confirmRecipeAction('edit')">Edit</button>
-                                    <button type="button" class="btn-role-select btn-role-supervisor" id="recipe-action-delete-btn" onclick="confirmRecipeAction('delete')">Delete</button>
+                                    <button type="button" class="btn-role-select btn-role-supervisor" id="recipe-action-disable-btn" onclick="confirmRecipeAction('disable')">Disable</button>
                                     <button type="button" class="btn-role-select btn-role-user" id="recipe-action-load-btn" onclick="confirmRecipeAction('load')">Load</button>
                                     <button type="button" class="btn-role-select btn-role-cancel" onclick="closeRecipeActionsModal()">Cancel</button>
                                 </div>
@@ -755,7 +755,7 @@
                 <!-- Distance Validation Test Screen -->
                 <div class="page" id="page-distance-validation">
                     <div class="validation-test-page">
-                        <button class="btn-back-inline" onclick="navigateValCalHub('validate-type-select')">Back</button>
+                        <button class="btn-back-inline" onclick="abortDistanceValidationAndGoBack('validate-type-select')">Back</button>
                         <h2 class="section-title">Distance Validation</h2>
                         <div class="validation-test-layout">
                             <div class="validation-card">
@@ -786,7 +786,7 @@
                 <!-- Distance Validation Result Screen -->
                 <div class="page" id="page-distance-validation-result">
                     <div class="validation-test-page">
-                        <button class="btn-back-inline" onclick="navigateValCalHub('validate-type-select')">Back</button>
+                        <button class="btn-back-inline" onclick="abortDistanceValidationAndGoBack('validate-type-select')">Back</button>
                         <h2 class="section-title">Distance Validation Result</h2>
                         <div class="validation-test-layout">
                             <div class="validation-card">
@@ -2328,11 +2328,11 @@
 
     
     <script src="keyboard.js?v=20260720f"></script>
-    <script src="rbac.js?v=20260723n"></script>
-    <script src="approval_biometric.js?v=20260724n"></script>
-    <script src="validation.js?v=20260724n"></script>
-    <script src="script.js?v=20260724o"></script>
-    <script src="profile_compliance.js?v=20260724n"></script>
+    <script src="rbac.js?v=20260725c"></script>
+    <script src="approval_biometric.js?v=20260725c"></script>
+    <script src="validation.js?v=20260725d"></script>
+    <script src="script.js?v=20260725d"></script>
+    <script src="profile_compliance.js?v=20260725b"></script>
 </body>
 
 </html>

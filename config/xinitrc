@@ -22,4 +22,9 @@ for _ in $(seq 1 60); do
   sleep 0.25
 done
 
+# Before Chromium: force connected panel primary @ 1024x600 and clear VNC overlays.
+if [[ -x /opt/kiosk/scripts/kiosk_fix_display.sh ]]; then
+  /bin/bash /opt/kiosk/scripts/kiosk_fix_display.sh || true
+fi
+
 exec /bin/bash /opt/kiosk/scripts/launch_chromium_kiosk.sh
