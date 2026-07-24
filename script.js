@@ -252,6 +252,20 @@ function initHardwareStream() {
 }
 
 // ===== PAGE NAVIGATION =====
+/** Send T,HOME* to ESP after any successful profile login (best-effort). */
+function sendHomeOnLogin() {
+    try {
+        var sender = (typeof apiRequest === 'function') ? apiRequest : null;
+        if (sender) {
+            sender('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
+        } else {
+            fetch('/api/hardware/test/home', { method: 'POST' }).catch(function () {});
+        }
+    } catch (e) {
+        // Best-effort: never block login
+    }
+}
+
 function sendTareOncePerSession(reason) {
     try {
         const key = '__tareSentThisSession';
@@ -284,7 +298,7 @@ function goToPage(pageName) {
         const activePage = document.querySelector('.page.active');
         const currentId = activePage ? activePage.id : '';
         if (pageName !== 'test-run' && currentId === 'page-test-run') {
-            alert('Test is running. Please complete or abort the test before navigating.');
+            kioskAlert('Test is running. Please complete or abort the test before navigating.');
             return;
         }
     }
@@ -294,7 +308,7 @@ function goToPage(pageName) {
     }
     if (window._mandatoryPasswordResetPending && pageName !== 'password-expired-reset' && pageName !== 'login') {
         if (typeof showAppModal === 'function') showAppModal('Please reset your password to continue.', 'Reset Password');
-        else alert('Please reset your password to continue.');
+        else kioskAlert('Please reset your password to continue.');
         return;
     }
     if (pageName !== 'report-preview') {
@@ -372,12 +386,12 @@ function goToPage(pageName) {
             } else if (skipNavForEditMember) {
                 if (typeof canEditMembers === 'function' && !canEditMembers()) {
                     if (typeof showAppModal === 'function') showAppModal('You do not have permission to edit profiles.', 'Permission');
-                    else alert('You do not have permission to edit profiles.');
+                    else kioskAlert('You do not have permission to edit profiles.');
                     return;
                 }
             } else if (!checkNavigationAccess(pageName)) {
                 if (typeof showAppModal === 'function') showAppModal('You do not have permission to access this page.', 'Permission');
-                else alert('You do not have permission to access this page.');
+                else kioskAlert('You do not have permission to access this page.');
                 return;
             }
         }
@@ -682,7 +696,7 @@ document.addEventListener('DOMContentLoaded', function () {
             const page = this.getAttribute('data-page');
 
             if (isNavigationLocked()) {
-                alert('Test is running. Please complete or abort the test before navigating.');
+                kioskAlert('Test is running. Please complete or abort the test before navigating.');
                 return;
             }
 
@@ -794,7 +808,7 @@ async function login() {
     const password = pwdEl ? pwdEl.value : '';
 
     if (!username || !password) {
-        alert('Please enter User ID and Password.');
+        kioskAlert('Please enter User ID and Password.');
         return;
     }
 
@@ -832,12 +846,12 @@ async function login() {
         var remaining = (typeof data.remainingAttempts === 'number') ? data.remainingAttempts : null;
         if (res.status === 403 && data && data.passwordChangeRequired) {
             if (typeof showMandatoryPasswordResetScreen === 'function') showMandatoryPasswordResetScreen(data.username || username);
-            else alert(msg || 'Password reset required.');
+            else kioskAlert(msg || 'Password reset required.');
             return;
         }
         if (res.status === 403 && data && data.passwordExpired) {
             if (typeof showPasswordExpiredResetScreen === 'function') showPasswordExpiredResetScreen(data.username || username, password);
-            else alert(msg || 'Password expired.');
+            else kioskAlert(msg || 'Password expired.');
             return;
         }
         if (res.status === 401) {
@@ -852,14 +866,14 @@ async function login() {
             msg = 'Login failed (HTTP ' + res.status + ').';
         }
         if (typeof showAppModal === 'function') showAppModal(msg, 'Login Failed');
-        else alert(msg);
+        else kioskAlert(msg);
     } catch (e) {
         var emsg = 'Login failed: ' + (e && e.message ? e.message : 'Network error');
         if (/json|unexpected token|unexpected end/i.test(emsg)) {
             emsg = 'Login failed: invalid server response. Please try again.';
         }
         if (typeof showAppModal === 'function') showAppModal(emsg, 'Login Error');
-        else alert(emsg);
+        else kioskAlert(emsg);
     }
 }
 window.login = login;
@@ -882,7 +896,8 @@ function setLoggedInUser(loggedInUser, uidEl, pwdEl) {
     if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
     if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
     if (typeof ensureAutoLogoutWatcher === 'function') ensureAutoLogoutWatcher();
-    if (typeof sendTareOncePerSession === 'function') sendTareOncePerSession('login');
+    // Every profile login: home the axis (T,HOME*). Do not use C,TARE here — that is calibration-gated.
+    if (typeof sendHomeOnLogin === 'function') sendHomeOnLogin();
     // Load factory settings for auto-logout minutes after real login
     try {
         var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
@@ -906,31 +921,41 @@ function logout() {
             ? abortPendingReportOnLogout() : Promise.resolve();
         abortP.finally(function () {
             if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
-            // Clear currentUser
-            currentUser = null;
-            window.currentUser = null;
+            var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+            var logoutReq = (typeof apiRequest === 'function')
+                ? apiRequest(base + '/api/data/auth/logout', { method: 'POST', body: { reason: 'user' } })
+                : fetch(base + '/api/data/auth/logout', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: 'user' })
+                });
+            Promise.resolve(logoutReq).catch(function () { return null; }).finally(function () {
+                // Clear currentUser
+                currentUser = null;
+                window.currentUser = null;
 
-            try {
-                localStorage.removeItem('currentUser');
-            } catch (e) {
-                console.warn('Failed to remove currentUser from localStorage:', e);
-            }
+                try {
+                    localStorage.removeItem('currentUser');
+                } catch (e) {
+                    console.warn('Failed to remove currentUser from localStorage:', e);
+                }
 
-            const uidEl = document.getElementById('login-uid');
-            const pwdEl = document.getElementById('login-pwd');
-            if (uidEl) uidEl.value = '';
-            if (pwdEl) pwdEl.value = '';
+                const uidEl = document.getElementById('login-uid');
+                const pwdEl = document.getElementById('login-pwd');
+                if (uidEl) uidEl.value = '';
+                if (pwdEl) pwdEl.value = '';
 
-            if (typeof updateUIForUser === 'function') {
-                updateUIForUser();
-            }
+                if (typeof updateUIForUser === 'function') {
+                    updateUIForUser();
+                }
 
-            try {
-                const sender = (typeof apiRequest === 'function') ? apiRequest : fetch;
-                sender('/api/hardware/test/home', { method: 'POST' }).catch(function () { });
-            } catch (e) { /* ignore */ }
+                try {
+                    const sender = (typeof apiRequest === 'function') ? apiRequest : fetch;
+                    sender('/api/hardware/test/home', { method: 'POST' }).catch(function () { });
+                } catch (e) { /* ignore */ }
 
-            goToPage('login');
+                goToPage('login');
+            });
         });
     };
     doLogout();
@@ -1095,16 +1120,46 @@ function updateShapeInputs() {
 
 function syncParameterSamplesMax() {
     const totalEl = document.getElementById('sample-size');
-    const total = totalEl ? parseInt(totalEl.value) || 100 : 100;
+    enforceMaxSampleSize100(totalEl, { showModal: false });
+    const total = totalEl ? parseInt(totalEl.value, 10) : NaN;
+    const cap = (!isNaN(total) && total > 0) ? Math.min(total, 100) : 100;
     const caps = { Thickness: 'param-samples-thickness', Diameter: 'param-samples-diameter', Width: 'param-samples-width', Length: 'param-samples-length', Hardness: 'param-samples-hardness', Weight: 'param-samples-weight' };
     Object.values(caps).forEach(id => {
         const el = document.getElementById(id);
         if (el) {
-            el.max = total;
+            el.max = cap;
             const val = parseInt(el.value, 10);
-            if (!isNaN(val) && val > 0 && val > total) el.value = total;
+            if (!isNaN(val) && val > 0 && val > cap) el.value = String(cap);
         }
     });
+}
+
+/** Clamp sample-size inputs to 100; show modal when user enters above max. */
+function enforceMaxSampleSize100(el, opts) {
+    opts = opts || {};
+    if (!el) return true;
+    var raw = String(el.value || '').trim();
+    if (!raw) return true;
+    var n = parseInt(raw, 10);
+    if (isNaN(n)) return true;
+    if (n > 100) {
+        el.value = '100';
+        if (opts.showModal !== false) {
+            if (typeof showAppModal === 'function') showAppModal('Max sample size is 100', 'Sample Size');
+            else kioskAlert('Max sample size is 100');
+        }
+        return false;
+    }
+    if (n < 1 && opts.allowEmpty !== true) {
+        return true;
+    }
+    return true;
+}
+
+function onSampleSizeInputChanged() {
+    var el = document.getElementById('sample-size');
+    enforceMaxSampleSize100(el, { showModal: true });
+    syncParameterSamplesMax();
 }
 
 function refreshQuickTestForm() {
@@ -1496,19 +1551,19 @@ var lastSelectedDelay = null;  // delay in seconds when auto - from delay modal
 function handleStartTest() {
     const productName = document.getElementById('recipe-product-name')?.value || '';
     if (!productName.trim()) {
-        alert('Please enter a product name');
+        kioskAlert('Please enter a product name');
         return;
     }
     if (currentTest === 'quick') {
         const batchNumber = document.getElementById('recipe-batch-number')?.value || '';
         if (!batchNumber.trim()) {
-            alert('Please enter a batch number for the quick test.');
+            kioskAlert('Please enter a batch number for the quick test.');
             return;
         }
         const sampleSizeVal = document.getElementById('sample-size')?.value?.trim();
         const sampleNum = parseInt(sampleSizeVal, 10);
         if (!sampleSizeVal || isNaN(sampleNum) || sampleNum < 1 || sampleNum > 100) {
-            alert('Please enter Sample Size (1-100).');
+            kioskAlert('Please enter Sample Size (1-100).');
             return;
         }
         showBackoffModal();
@@ -1574,13 +1629,13 @@ async function confirmBackoffAndMode(mode) {
     }
     var rawVal = parseFloat(input.value);
     if (isNaN(rawVal)) {
-        alert('Please enter a valid back off distance.');
+        kioskAlert('Please enter a valid back off distance.');
         return;
     }
     var mm;
     if (lastBackoffDistanceUnit === 'inch') {
         if (rawVal > 1.57) {
-            alert('Maximum is 1.57 inch.');
+            kioskAlert('Maximum is 1.57 inch.');
             return;
         }
         mm = rawVal * 25.4;
@@ -1643,7 +1698,7 @@ async function confirmBackoffAndMode(mode) {
                 if (lastTestRunRecipe) lastTestRunRecipe.delay = delaySeconds;
             } catch (e) {
                 console.error('startTest failed:', e);
-                alert('Failed to start test: ' + (e.message || 'Unknown error'));
+                kioskAlert('Failed to start test: ' + (e.message || 'Unknown error'));
             } finally {
                 hideLoadingModal();
                 lastSelectedMode = null;
@@ -1706,13 +1761,13 @@ function confirmDelayModal() {
 async function startTest() {
     const productName = document.getElementById('recipe-product-name')?.value || '';
     if (!productName.trim()) {
-        alert('Please enter a product name');
+        kioskAlert('Please enter a product name');
         return;
     }
     if (currentTest === 'quick') {
         const batchNumber = document.getElementById('recipe-batch-number')?.value || '';
         if (!batchNumber.trim()) {
-            alert('Please enter a batch number for the quick test.');
+            kioskAlert('Please enter a batch number for the quick test.');
             return;
         }
         // Do not block navigation on backoff failure; always proceed to test screen
@@ -1884,7 +1939,7 @@ function filterReports(type) {
         if (typeof showAppModal === 'function') {
             showAppModal("You Don't Have Access to Audit Trail", 'Audit');
         } else {
-            alert("You Don't Have Access to Audit Trail");
+            kioskAlert("You Don't Have Access to Audit Trail");
         }
         return;
     }
@@ -1915,14 +1970,15 @@ async function exportFilteredReports() {
         reports = reports.filter(function (r) { return (r.type || 'test') === currentReportFilter; });
     }
     if (reports.length === 0) {
-        alert('No reports to export.');
+        kioskAlert('No reports to export.');
         return;
     }
     var ids = reports.map(function (r) { return r.id; }).filter(function (id) { return id != null; });
     if (ids.length === 0) {
-        alert('No report IDs to export.');
+        kioskAlert('No report IDs to export.');
         return;
     }
+    beginKioskExportGuard();
     try {
         var pdfHtmlById = await buildPdfHtmlByIdMap(ids);
         if (!pdfHtmlById) return;
@@ -1930,10 +1986,12 @@ async function exportFilteredReports() {
             method: 'POST',
             body: JSON.stringify({ report_ids: ids, pdf_html_by_id: pdfHtmlById })
         });
-        alert(exportSuccessUserMessage(expResult, ids.length + ' report(s)'));
+        kioskAlert(exportSuccessUserMessage(expResult, ids.length + ' report(s)'));
     } catch (e) {
         var hint = '\n\nReports remain stored on the device; summary PDFs are in the reports folder if generation succeeded.';
-        alert('Export failed: ' + (e.message || 'Unknown error') + hint);
+        kioskAlert('Export failed: ' + (e.message || 'Unknown error') + hint);
+    } finally {
+        endKioskExportGuard();
     }
 }
 
@@ -2049,7 +2107,7 @@ async function openRecipePrintPreview(recipeId) {
     const recipes = await getRecipes();
     const recipe = recipes.find(r => r.id === recipeId);
     if (!recipe) {
-        alert('Recipe not found.');
+        kioskAlert('Recipe not found.');
         return;
     }
     await populateRecipePrintPreview(recipe);
@@ -2058,7 +2116,7 @@ async function openRecipePrintPreview(recipeId) {
 
 async function handlePreviewRecipe() {
     if (!currentReportRecipe) {
-        alert('No recipe data available for this report.');
+        kioskAlert('No recipe data available for this report.');
         return;
     }
     await populateRecipePrintPreview(currentReportRecipe);
@@ -2067,7 +2125,7 @@ async function handlePreviewRecipe() {
 
 async function handlePrintRecipe() {
     if (!currentReportRecipe) {
-        alert('No recipe data available for this report.');
+        kioskAlert('No recipe data available for this report.');
         return;
     }
     await populateRecipePrintPreview(currentReportRecipe);
@@ -2077,7 +2135,7 @@ async function handlePrintRecipe() {
 
 async function handlePrintRecipeA4() {
     if (!currentRecipeForPrint) {
-        alert('No recipe to print. Open a recipe from View Recipe first.');
+        kioskAlert('No recipe to print. Open a recipe from View Recipe first.');
         return;
     }
     try {
@@ -2086,19 +2144,19 @@ async function handlePrintRecipeA4() {
             body: { type: 'recipe', recipe_data: currentRecipeForPrint }
         });
         if (result && result.success !== false && !result.error) {
-            alert('Sent to A4 printer.');
+            kioskAlert('Sent to A4 printer.');
         } else {
-            alert((result && result.error) || 'A4 print failed. Check printer connection.');
+            kioskAlert((result && result.error) || 'A4 print failed. Check printer connection.');
         }
     } catch (e) {
         console.error('Recipe A4 print error:', e);
-        alert('Print failed: ' + (e.message || 'Check printer connection.'));
+        kioskAlert('Print failed: ' + (e.message || 'Check printer connection.'));
     }
 }
 
 async function handlePrintRecipeThermal() {
     if (!currentRecipeForPrint) {
-        alert('No recipe to print. Open a recipe from View Recipe first.');
+        kioskAlert('No recipe to print. Open a recipe from View Recipe first.');
         return;
     }
     try {
@@ -2107,34 +2165,35 @@ async function handlePrintRecipeThermal() {
             body: { type: 'recipe', recipe_data: currentRecipeForPrint }
         });
         if (result && result.success !== false && !result.error) {
-            alert('Sent to thermal printer.');
+            kioskAlert('Sent to thermal printer.');
         } else {
-            alert((result && result.error) || 'Thermal print failed. Check printer connection.');
+            kioskAlert((result && result.error) || 'Thermal print failed. Check printer connection.');
         }
     } catch (e) {
         console.error('Recipe thermal print error:', e);
-        alert('Print failed: ' + (e.message || 'Check printer connection.'));
+        kioskAlert('Print failed: ' + (e.message || 'Check printer connection.'));
     }
 }
 
 async function handleExportRecipe() {
     if (!currentRecipeForPrint) {
-        alert('No recipe to export. Open a recipe from View Recipe first.');
+        kioskAlert('No recipe to export. Open a recipe from View Recipe first.');
         return;
     }
     var u = window.currentUser;
     if (typeof userCanExportToUsb === 'function' && !userCanExportToUsb(u)) {
-        alert('You do not have permission to export to USB.');
+        kioskAlert('You do not have permission to export to USB.');
         return;
     }
     var role = typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '';
     var titleText = 'Export Recipe';
+    beginKioskExportGuard();
     try {
         var token = '';
         if (typeof _ensureExportApprovalToken === 'function') {
             token = await _ensureExportApprovalToken();
             if (role !== 'factory' && !token) {
-                alert('Export cancelled — approval is required.');
+                kioskAlert('Export cancelled — approval is required.');
                 return;
             }
         }
@@ -2146,7 +2205,7 @@ async function handleExportRecipe() {
         var devices = (usbData && usbData.devices) ? usbData.devices : [];
         if (!devices.length) {
             if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
-            alert('No external pendrive detected. Please connect a USB pendrive and try again.');
+            kioskAlert('No external pendrive detected. Please connect a USB pendrive and try again.');
             return;
         }
         var devicePath;
@@ -2156,12 +2215,12 @@ async function handleExportRecipe() {
             devicePath = await pickPendrive(devices);
         } else {
             if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
-            alert('Multiple pendrives detected. Connect only one and try again.');
+            kioskAlert('Multiple pendrives detected. Connect only one and try again.');
             return;
         }
         if (!devicePath) {
             if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
-            alert('Export cancelled.');
+            kioskAlert('Export cancelled.');
             return;
         }
         if (typeof setLoadingProgress === 'function') {
@@ -2176,12 +2235,14 @@ async function handleExportRecipe() {
             }
         });
         if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
-        alert(typeof exportSuccessUserMessage === 'function'
+        kioskAlert(typeof exportSuccessUserMessage === 'function'
             ? exportSuccessUserMessage(result, 'Recipe')
             : ('Recipe exported to USB' + (result && result.export_directory ? (':\n' + result.export_directory) : '')));
     } catch (e) {
         if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
-        alert('Recipe export failed: ' + (e && e.message ? e.message : 'Unknown error'));
+        kioskAlert('Recipe export failed: ' + (e && e.message ? e.message : 'Unknown error'));
+    } finally {
+        endKioskExportGuard();
     }
 }
 
@@ -2280,13 +2341,14 @@ async function populateReportPreviewDom(stored) {
             rows.push('<tr><th>Date</th><td>' + dateStr + '</td><th>Time</th><td>' + timeStr + '</td></tr>');
             if (reportType === 'validation') {
                 var subtype = stored.validationSubtype || 'load';
+                var valStatus = stored.approvalPassFail || stored.status || 'Pending';
                 if (subtype === 'load') {
                     rows.push('<tr><th>Expected Weight (g)</th><td>' + (stored.expectedWeight != null ? stored.expectedWeight : '--') + '</td><th>Min (g)</th><td>' + (stored.min != null ? stored.min.toFixed(2) : '--') + '</td></tr>');
                     rows.push('<tr><th>Max (g)</th><td>' + (stored.max != null ? stored.max.toFixed(2) : '--') + '</td><th>Mean (g)</th><td>' + (stored.mean != null ? stored.mean.toFixed(2) : '--') + '</td></tr>');
-                    rows.push('<tr><th>Status</th><td colspan="3">' + (stored.status || '--') + '</td></tr>');
+                    rows.push('<tr><th>Status</th><td colspan="3">' + valStatus + '</td></tr>');
                 } else {
                     rows.push('<tr><th>Gauge Value (mm)</th><td>' + (stored.expectedGaugeBlock != null ? (typeof stored.expectedGaugeBlock === 'number' ? stored.expectedGaugeBlock.toFixed(2) : stored.expectedGaugeBlock) : '--') + '</td><th>Measured Value (mm)</th><td>' + (stored.distance != null ? (typeof stored.distance === 'number' ? stored.distance.toFixed(2) : stored.distance) : '--') + '</td></tr>');
-                    rows.push('<tr><th>Difference (mm)</th><td>' + (stored.difference != null ? (typeof stored.difference === 'number' ? stored.difference.toFixed(2) : stored.difference) : '--') + '</td><th>Status</th><td>' + (stored.status || '--') + '</td></tr>');
+                    rows.push('<tr><th>Difference (mm)</th><td>' + (stored.difference != null ? (typeof stored.difference === 'number' ? stored.difference.toFixed(2) : stored.difference) : '--') + '</td><th>Status</th><td>' + valStatus + '</td></tr>');
                 }
             } else {
                 rows.push('<tr><th>Status</th><td colspan="3">' + (stored.status || td.status || 'Calibrated') + '</td></tr>');
@@ -2781,13 +2843,13 @@ function openReportPreview(reportId, options) {
     if (!canOpen) {
         if (typeof denyPermission === 'function') denyPermission('view report preview');
         else if (typeof showAppModal === 'function') showAppModal('You do not have permission to open report preview.', 'Permission');
-        else alert('You do not have permission to open report preview.');
+        else kioskAlert('You do not have permission to open report preview.');
         return Promise.resolve();
     }
     if (typeof showLoadingOverlay === 'function') {
         showLoadingOverlay('Report Preview', 'Loading report preview...', { cancellable: false });
     }
-    return apiRequest('/api/reports/' + reportId + '/preview').then(async function (data) {
+    return apiRequest('/api/reports/' + reportId + '/preview?audit=1').then(async function (data) {
         if (data && data.preview) {
             currentReportId = reportId;
             window.currentReportId = reportId;
@@ -2929,7 +2991,7 @@ async function buildPdfHtmlByIdMap(ids) {
                 if (typeof showAppModal === 'function') {
                     showAppModal('Could not build PDF layout for report ' + rid + '.', 'Export');
                 } else {
-                    alert('Could not build PDF layout for report ' + rid + '.');
+                    kioskAlert('Could not build PDF layout for report ' + rid + '.');
                 }
                 return null;
             }
@@ -2938,7 +3000,7 @@ async function buildPdfHtmlByIdMap(ids) {
             if (typeof showAppModal === 'function') {
                 showAppModal('Could not load report ' + rid + ' for export.', 'Export');
             } else {
-                alert('Could not load report ' + rid + ' for export.');
+                kioskAlert('Could not load report ' + rid + ' for export.');
             }
             return null;
         }
@@ -3126,7 +3188,7 @@ async function handlePrintReport() {
         if (typeof showAppModal === 'function') {
             showAppModal('You do not have permission to print reports.', 'Print');
         } else {
-            alert('You do not have permission to print reports.');
+            kioskAlert('You do not have permission to print reports.');
         }
         return;
     }
@@ -3134,7 +3196,7 @@ async function handlePrintReport() {
         if (typeof showAppModal === 'function') {
             showAppModal('This report must be approved before printing.', 'Print');
         } else {
-            alert('This report must be approved before printing.');
+            kioskAlert('This report must be approved before printing.');
         }
         return;
     }
@@ -3142,7 +3204,7 @@ async function handlePrintReport() {
         if (typeof showAppModal === 'function') {
             showAppModal('No report selected to print.', 'Print');
         } else {
-            alert('No report selected to print.');
+            kioskAlert('No report selected to print.');
         }
         return;
     }
@@ -3151,7 +3213,7 @@ async function handlePrintReport() {
             if (typeof showAppModal === 'function') {
                 showAppModal('Could not load report data. Please try again.', 'Print');
             } else {
-                alert('Could not load report data. Please try again.');
+                kioskAlert('Could not load report data. Please try again.');
             }
             return;
         }
@@ -3163,19 +3225,19 @@ async function handlePrintReport() {
                 if (typeof showAppModal === 'function') {
                     showAppModal('Sent to A4 printer.', 'Print');
                 } else {
-                    alert('Sent to A4 printer.');
+                    kioskAlert('Sent to A4 printer.');
                 }
             } else if (typeof showAppModal === 'function') {
                 showAppModal((result && result.error) || 'A4 print failed. Check printer connection.', 'Print');
             } else {
-                alert((result && result.error) || 'A4 print failed. Check printer connection.');
+                kioskAlert((result && result.error) || 'A4 print failed. Check printer connection.');
             }
         }).catch(function (e) {
             var msg = 'Print failed: ' + (e && e.message ? e.message : 'Check printer connection.');
             if (typeof showAppModal === 'function') {
                 showAppModal(msg, 'Print');
             } else {
-                alert(msg);
+                kioskAlert(msg);
             }
         });
     });
@@ -3186,7 +3248,7 @@ async function handlePrintThermal() {
         if (typeof showAppModal === 'function') {
             showAppModal('You do not have permission to print reports.', 'Print');
         } else {
-            alert('You do not have permission to print reports.');
+            kioskAlert('You do not have permission to print reports.');
         }
         return;
     }
@@ -3194,7 +3256,7 @@ async function handlePrintThermal() {
         if (typeof showAppModal === 'function') {
             showAppModal('This report must be approved before printing.', 'Print');
         } else {
-            alert('This report must be approved before printing.');
+            kioskAlert('This report must be approved before printing.');
         }
         return;
     }
@@ -3202,7 +3264,7 @@ async function handlePrintThermal() {
         if (typeof showAppModal === 'function') {
             showAppModal('No report selected to print.', 'Print');
         } else {
-            alert('No report selected to print.');
+            kioskAlert('No report selected to print.');
         }
         return;
     }
@@ -3211,7 +3273,7 @@ async function handlePrintThermal() {
             if (typeof showAppModal === 'function') {
                 showAppModal('Could not load report data. Please try again.', 'Print');
             } else {
-                alert('Could not load report data. Please try again.');
+                kioskAlert('Could not load report data. Please try again.');
             }
             return;
         }
@@ -3223,19 +3285,19 @@ async function handlePrintThermal() {
                 if (typeof showAppModal === 'function') {
                     showAppModal('Sent to thermal printer.', 'Print');
                 } else {
-                    alert('Sent to thermal printer.');
+                    kioskAlert('Sent to thermal printer.');
                 }
             } else if (typeof showAppModal === 'function') {
                 showAppModal((result && result.error) || 'Thermal print failed. Check printer connection.', 'Print');
             } else {
-                alert((result && result.error) || 'Thermal print failed. Check printer connection.');
+                kioskAlert((result && result.error) || 'Thermal print failed. Check printer connection.');
             }
         }).catch(function (e) {
             var msg = 'Print failed: ' + (e && e.message ? e.message : 'Check printer connection.');
             if (typeof showAppModal === 'function') {
                 showAppModal(msg, 'Print');
             } else {
-                alert(msg);
+                kioskAlert(msg);
             }
         });
     });
@@ -3244,9 +3306,10 @@ async function handlePrintThermal() {
 async function handleExportReport() {
     var id = currentReportId;
     if (id == null) {
-        alert('No report selected to export.');
+        kioskAlert('No report selected to export.');
         return;
     }
+    beginKioskExportGuard();
     try {
         var pdfHtmlById = await buildPdfHtmlByIdMap([id]);
         if (!pdfHtmlById) return;
@@ -3254,10 +3317,12 @@ async function handleExportReport() {
             method: 'POST',
             body: JSON.stringify({ report_ids: [id], pdf_html_by_id: pdfHtmlById })
         });
-        alert(exportSuccessUserMessage(result, 'Report'));
+        kioskAlert(exportSuccessUserMessage(result, 'Report'));
     } catch (e) {
         var hint = '\n\nReports remain stored on the device; summary PDFs are in the reports folder if generation succeeded.';
-        alert('Export failed: ' + (e.message || 'Unknown error') + hint);
+        kioskAlert('Export failed: ' + (e.message || 'Unknown error') + hint);
+    } finally {
+        endKioskExportGuard();
     }
 }
 
@@ -3337,12 +3402,12 @@ async function saveRecipe() {
 
     // Validate required fields
     if (!productName.trim()) {
-        alert('Please enter a Product Name before saving the recipe.');
+        kioskAlert('Please enter a Product Name before saving the recipe.');
         return false;
     }
     const sampleNum = parseInt(sampleSize, 10);
     if (!sampleSize.trim() || isNaN(sampleNum) || sampleNum < 1 || sampleNum > 100) {
-        alert('Please enter Sample Size (1-100) before saving.');
+        kioskAlert('Please enter Sample Size (1-100) before saving.');
         return false;
     }
 
@@ -3391,7 +3456,7 @@ async function saveRecipe() {
     if (Object.keys(parameterSamples).length > 0) {
         const atLeastOneEqualsTotal = Object.values(parameterSamples).some(function (v) { return parseInt(v, 10) === totalSamples; });
         if (!atLeastOneEqualsTotal) {
-            alert('At least one parameter sample should be equal to the total number of samples.');
+            kioskAlert('At least one parameter sample should be equal to the total number of samples.');
             return null;
         }
     }
@@ -3499,7 +3564,7 @@ async function saveRecipe() {
             if (typeof showAppModal === 'function') {
                 showAppModal('Recipe not saved. Recipe approval UI is missing.', 'Save Recipe');
             } else {
-                alert('Recipe not saved. Recipe approval UI is missing.');
+                kioskAlert('Recipe not saved. Recipe approval UI is missing.');
             }
             return null;
         }
@@ -3511,7 +3576,7 @@ async function saveRecipe() {
             if (typeof showAppModal === 'function') {
                 showAppModal(modalMsg, 'Save Recipe');
             } else {
-                alert(modalMsg);
+                kioskAlert(modalMsg);
             }
             return null;
         }
@@ -3519,7 +3584,7 @@ async function saveRecipe() {
             if (typeof showAppModal === 'function') {
                 showAppModal('Recipe not saved. Recipe approval credentials are required.', 'Save Recipe');
             } else {
-                alert('Recipe not saved. Recipe approval credentials are required.');
+                kioskAlert('Recipe not saved. Recipe approval credentials are required.');
             }
             return null;
         }
@@ -3532,7 +3597,7 @@ async function saveRecipe() {
         } else if (typeof showAppModal === 'function') {
             showAppModal('Failed to save recipe: ' + msg, 'Save Recipe');
         } else {
-            alert('Failed to save recipe: ' + msg);
+            kioskAlert('Failed to save recipe: ' + msg);
         }
         return null;
     }
@@ -3553,7 +3618,7 @@ async function deleteRecipe(recipeId) {
     if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
         const role = getCurrentRole();
         if (!canPerformAction(role, 'recipe-delete', 'delete')) {
-            alert('You do not have permission to delete recipes.');
+            kioskAlert('You do not have permission to delete recipes.');
             return;
         }
     }
@@ -3564,7 +3629,7 @@ async function deleteRecipe(recipeId) {
         displayRecipeList();
     } catch (e) {
         console.error('Failed to delete recipe:', e);
-        alert('Failed to delete recipe: ' + e.message);
+        kioskAlert('Failed to delete recipe: ' + e.message);
     }
 }
 
@@ -3696,12 +3761,16 @@ function openRecipeActionsModal(recipeId) {
     }
     var editBtn = document.getElementById('recipe-action-edit-btn');
     var deleteBtn = document.getElementById('recipe-action-delete-btn');
+    var loadBtn = document.getElementById('recipe-action-load-btn');
     if (recipeListLoadOnly) {
         if (editBtn) editBtn.style.display = 'none';
         if (deleteBtn) deleteBtn.style.display = 'none';
+        if (loadBtn) loadBtn.style.display = '';
     } else {
+        // Manage Recipe: Edit / Delete / Approve only — no Load (use Load Recipe for that).
         if (editBtn) editBtn.style.display = '';
         if (deleteBtn) deleteBtn.style.display = '';
+        if (loadBtn) loadBtn.style.display = 'none';
     }
     var overlay = document.getElementById('recipe-actions-modal-overlay');
     if (overlay) overlay.style.display = 'flex';
@@ -3764,7 +3833,7 @@ function submitRecipeApprove() {
                 if (typeof showAppModal === 'function') {
                     showAppModal('Recipe approved.', 'Recipes');
                 } else {
-                    alert('Recipe approved.');
+                    kioskAlert('Recipe approved.');
                 }
                 displayRecipeList();
             } else if (typeof showAppModal === 'function') {
@@ -3804,7 +3873,7 @@ async function loadRecipeById(recipeId) {
         var recipe = result.recipe;
 
         if (!recipe) {
-            _hideLoadingAfterMinDuration(loadStart, function () { alert('Recipe not found!'); });
+            _hideLoadingAfterMinDuration(loadStart, function () { kioskAlert('Recipe not found!'); });
             return;
         }
 
@@ -3813,7 +3882,7 @@ async function loadRecipeById(recipeId) {
     } catch (e) {
         console.error('Failed to load recipe:', e);
         _hideLoadingAfterMinDuration(loadStart, function () {
-            alert('Failed to load recipe: ' + (e.message || 'Unknown error'));
+            kioskAlert('Failed to load recipe: ' + (e.message || 'Unknown error'));
         });
     }
 }
@@ -3851,13 +3920,13 @@ function confirmBatchNumberAndLoad() {
     const batchInput = document.getElementById('load-recipe-batch-input');
     
     if (!batchInput || !batchInput.value.trim()) {
-        alert('Please enter a batch number');
+        kioskAlert('Please enter a batch number');
         if (batchInput) batchInput.focus();
         return;
     }
     
     if (!pendingRecipeToLoad) {
-        alert('No recipe to load');
+        kioskAlert('No recipe to load');
         closeBatchNumberModal();
         return;
     }
@@ -3866,7 +3935,7 @@ function confirmBatchNumberAndLoad() {
         if (typeof showAppModal === 'function') {
             showAppModal('This recipe is pending QA approval and cannot be loaded for testing.', 'Load Recipe');
         } else {
-            alert('This recipe is pending QA approval and cannot be loaded for testing.');
+            kioskAlert('This recipe is pending QA approval and cannot be loaded for testing.');
         }
         return;
     }
@@ -3931,13 +4000,13 @@ function confirmWeightEntryModal() {
     if (!input) return;
     var raw = (input.value || '').trim();
     if (!raw) {
-        alert('Please enter a valid measured value (grams)');
+        kioskAlert('Please enter a valid measured value (grams)');
         if (input) input.focus();
         return;
     }
     var val = parseFloat(raw);
     if (isNaN(val) || val < 0) {
-        alert('Please enter a valid measured value (grams)');
+        kioskAlert('Please enter a valid measured value (grams)');
         if (input) input.focus();
         return;
     }
@@ -3955,7 +4024,7 @@ async function editRecipe(recipeId) {
     const recipe = recipes.find(r => r.id === recipeId);
 
     if (!recipe) {
-        alert('Recipe not found!');
+        kioskAlert('Recipe not found!');
         return;
     }
 
@@ -4094,7 +4163,7 @@ function handleTestReportSaveFailure(err) {
         msg = 'Test report was not saved: your profile needs the Test access permission card.';
     }
     if (typeof showAppModal === 'function') showAppModal(msg, 'Test Report');
-    else alert(msg);
+    else kioskAlert(msg);
     if (typeof userCanViewReports === 'function' && userCanViewReports() && typeof goToPage === 'function') {
         goToPage('reports');
     } else if (typeof goToPage === 'function') {
@@ -4129,7 +4198,7 @@ function startTestRun(recipe) {
     if (typeof userCanRunHardwareTests === 'function' && !userCanRunHardwareTests()) {
         var denyMsg = 'Your profile does not have Test access. Assign the Test access permission card, then log in again.';
         if (typeof showAppModal === 'function') showAppModal(denyMsg, 'Permission');
-        else alert(denyMsg);
+        else kioskAlert(denyMsg);
         return;
     }
     if (recipe && recipe.parameters) {
@@ -4508,7 +4577,7 @@ async function runHardnessTestLoop() {
     if (!recipe) return;
     var params = recipe.parameters || {};
     if (getParametersForSample(1, recipe).length === 0) {
-        alert('No parameters selected. Please select at least one parameter with sample size > 0 in the recipe.');
+        kioskAlert('No parameters selected. Please select at least one parameter with sample size > 0 in the recipe.');
         return;
     }
     var sampleSize = parseInt(recipe.sampleSize) || 10;
@@ -4716,7 +4785,7 @@ async function runHardnessTestLoop() {
                     friendlyMsg = 'Test failed: ' + msg;
                 }
                 if (typeof showAppModal === 'function') showAppModal(friendlyMsg, 'Test');
-                else alert(friendlyMsg);
+                else kioskAlert(friendlyMsg);
                 testRunAborted = true;
                 break;
             }
@@ -4834,7 +4903,7 @@ function toggleTestRunState() {
             return;
         }
         if (!lastTestRunRecipe) {
-            alert('No recipe loaded. Please load or create a recipe first.');
+            kioskAlert('No recipe loaded. Please load or create a recipe first.');
             return;
         }
         // Switch to Running/Stop state
@@ -5253,12 +5322,18 @@ function checkMeasurementAndShowFailureModalIfNeeded(value, nominal, toleranceCo
         console.log('[DEBUG] Failure modal element:', modal);
         if (!modal) {
             console.error('[DEBUG] Sample failure modal not found');
-            // Fallback: show alert and wait for confirmation
-            if (confirm('Sample failed tolerance. Do you want to continue?')) {
-                if (typeof onContinue === 'function') onContinue();
-            } else {
-                if (typeof onEnd === 'function') onEnd();
-            }
+            var ask = (typeof showConfirmModal === 'function')
+                ? showConfirmModal('Sample failed tolerance. Do you want to continue?', 'Sample Failed')
+                : (typeof showConfirmModalCompat === 'function')
+                    ? showConfirmModalCompat('Sample failed tolerance. Do you want to continue?', 'Sample Failed')
+                    : Promise.resolve(false);
+            Promise.resolve(ask).then(function (ok) {
+                if (ok) {
+                    if (typeof onContinue === 'function') onContinue();
+                } else if (typeof onEnd === 'function') {
+                    onEnd();
+                }
+            });
             return;
         }
         console.log('[DEBUG] Showing sample failure modal');
@@ -5275,7 +5350,7 @@ async function nextFormStep() {
     if (currentTest === 'quick' || currentTest === 'create-recipe') {
         const productName = document.getElementById('recipe-product-name')?.value || '';
         if (!productName.trim()) {
-            alert('Please enter a Product Name.');
+            kioskAlert('Please enter a Product Name.');
             return;
         }
         const parameters = {};
@@ -5285,13 +5360,13 @@ async function nextFormStep() {
             if (checkbox?.checked && label) parameters[label] = true;
         });
         if (Object.keys(parameters).length === 0) {
-            alert('Please select at least one parameter to measure.');
+            kioskAlert('Please select at least one parameter to measure.');
             return;
         }
         const sampleSizeVal = document.getElementById('sample-size')?.value?.trim();
         const sampleNum = parseInt(sampleSizeVal, 10);
         if (!sampleSizeVal || isNaN(sampleNum) || sampleNum < 1 || sampleNum > 100) {
-            alert('Please enter Sample Size (1-100).');
+            kioskAlert('Please enter Sample Size (1-100).');
             return;
         }
         let paramSampleExceedsTotal = false;
@@ -5308,7 +5383,7 @@ async function nextFormStep() {
             }
         });
         if (paramSampleExceedsTotal) {
-            alert('The parameter sample cannot be more than the total sample size (' + sampleNum + '). Please adjust the samples per parameter.');
+            kioskAlert('The parameter sample cannot be more than the total sample size (' + sampleNum + '). Please adjust the samples per parameter.');
             return;
         }
         let atLeastOneEqualsTotal = false;
@@ -5323,7 +5398,7 @@ async function nextFormStep() {
             }
         });
         if (!atLeastOneEqualsTotal) {
-            alert('At least one parameter sample should be equal to the total number of samples.');
+            kioskAlert('At least one parameter sample should be equal to the total number of samples.');
             return;
         }
         // Create-recipe: Save directly from step 1 and go to manage-recipes (no step 2 page)
@@ -5436,7 +5511,7 @@ async function confirmRoleChange(newRole) {
     if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
         const role = getCurrentRole();
         if (!canPerformAction(role, 'user-change-role', 'change')) {
-            alert('You do not have permission to change user roles.');
+            kioskAlert('You do not have permission to change user roles.');
             closeRoleModal();
             return;
         }
@@ -5446,7 +5521,7 @@ async function confirmRoleChange(newRole) {
     const members = await getMembers();
     const member = members.find(m => m.id === currentMemberIdForRoleEdit);
     if (member && typeof isProtectedFactoryUser === 'function' && isProtectedFactoryUser(member)) {
-        alert('This factory user cannot be modified.');
+        kioskAlert('This factory user cannot be modified.');
         closeRoleModal();
         return;
     }
@@ -5462,7 +5537,7 @@ async function confirmRoleChange(newRole) {
         closeRoleModal();
     } catch (e) {
         console.error('Failed to update member role:', e);
-        alert('Failed to update role: ' + e.message);
+        kioskAlert('Failed to update role: ' + e.message);
     }
 }
 
@@ -5501,7 +5576,7 @@ async function saveUserProfile() {
     var newName = newNameEl ? newNameEl.value.trim() : '';
     var newPass = newPassEl ? newPassEl.value : '';
     if (!newName) {
-        alert('Please enter a name.');
+        kioskAlert('Please enter a name.');
         return;
     }
     var user = (typeof window.currentUser !== 'undefined' && window.currentUser) ? window.currentUser : (typeof currentUser !== 'undefined' && currentUser) ? currentUser : null;
@@ -5514,7 +5589,7 @@ async function saveUserProfile() {
         }
     }
     if (!user || user.id == null) {
-        alert('Cannot save profile: no user logged in.');
+        kioskAlert('Cannot save profile: no user logged in.');
         return;
     }
     try {
@@ -5534,7 +5609,7 @@ async function saveUserProfile() {
         showModal('Success', 'Profile saved successfully.');
     } catch (e) {
         console.error('Failed to save profile:', e);
-        alert('Failed to save profile: ' + (e.message || 'Unknown error'));
+        kioskAlert('Failed to save profile: ' + (e.message || 'Unknown error'));
     }
 }
 
@@ -5545,7 +5620,7 @@ async function deleteMember(id) {
     if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
         const role = getCurrentRole();
         if (!canPerformAction(role, 'user-delete', 'delete')) {
-            alert('You do not have permission to delete members.');
+            kioskAlert('You do not have permission to delete members.');
             return;
         }
     }
@@ -5554,7 +5629,7 @@ async function deleteMember(id) {
     const members = await getMembers();
     const member = members.find(m => m.id === id);
     if (member && typeof isProtectedFactoryUser === 'function' && isProtectedFactoryUser(member)) {
-        alert('This factory user cannot be deleted.');
+        kioskAlert('This factory user cannot be deleted.');
         return;
     }
 
@@ -5568,7 +5643,7 @@ async function deleteMember(id) {
                 if (typeof displayMembersList === 'function') displayMembersList();
             } catch (e) {
                 console.error('Failed to delete member:', e);
-                alert('Failed to delete member: ' + e.message);
+                kioskAlert('Failed to delete member: ' + e.message);
             }
         },
         true
@@ -5605,7 +5680,7 @@ function validateNumericInput(input) {
 
         // Show alert for first time
         if (!input._warningShown) {
-            alert('⚠ Warning: Only numbers are allowed in parameter fields!');
+            kioskAlert('⚠ Warning: Only numbers are allowed in parameter fields!');
             input._warningShown = true;
 
             // Reset warning flag after 5 seconds
@@ -5869,6 +5944,17 @@ function showModal(title, message, callback, isConfirm = false, showCancelButton
             newOk.textContent = (okLabel != null && okLabel !== '') ? okLabel : 'OK';
             newOk.focus();
         }
+    } else if (isConfirm && typeof showConfirmModal === 'function') {
+        showConfirmModal(message, title, okLabel, cancelLabel).then(function (ok) {
+            if (typeof callback === 'function') callback(!!ok);
+        });
+    } else if (typeof showAppModal === 'function') {
+        showAppModal(message, title).then(function () {
+            if (typeof callback === 'function') callback(true);
+        });
+    } else {
+        console.warn('[kiosk] showModal:', title, message);
+        if (typeof callback === 'function') callback(!isConfirm);
     }
 }
 
@@ -6177,16 +6263,22 @@ function confirmParamSamples() {
     const maxSamples = (totalSampleSize > 0 && totalSampleSize <= 100) ? totalSampleSize : 100;
     const rawVal = modalInput?.value?.trim();
     if (!rawVal) {
-        alert('Please enter the number of samples for this parameter.');
+        kioskAlert('Please enter the number of samples for this parameter.');
         return;
     }
     let val = parseInt(modalInput.value, 10);
     if (isNaN(val) || val < 1) {
-        alert('Please enter a valid sample count (1 or more).');
+        kioskAlert('Please enter a valid sample count (1 or more).');
+        return;
+    }
+    if (val > 100) {
+        if (modalInput) modalInput.value = '100';
+        if (typeof showAppModal === 'function') showAppModal('Max sample size is 100', 'Sample Size');
+        else kioskAlert('Max sample size is 100');
         return;
     }
     if (val > maxSamples) {
-        alert('The parameter sample cannot be more than the total sample size (' + maxSamples + ').');
+        kioskAlert('The parameter sample cannot be more than the total sample size (' + maxSamples + ').');
         return;
     }
     const samplesId = resolveParamSamplesId(currentParamConfig);
@@ -6522,21 +6614,21 @@ function confirmConversionFactor() {
     
     // Validate unit name
     if (!customUnitNameInput || !customUnitNameInput.value.trim()) {
-        alert('Please enter a unit name');
+        kioskAlert('Please enter a unit name');
         if (customUnitNameInput) customUnitNameInput.focus();
         return;
     }
     
     // Validate conversion factor
     if (!conversionFactorInput || !conversionFactorInput.value.trim()) {
-        alert('Please enter a conversion factor');
+        kioskAlert('Please enter a conversion factor');
         if (conversionFactorInput) conversionFactorInput.focus();
         return;
     }
     
     const factor = parseFloat(conversionFactorInput.value);
     if (isNaN(factor) || factor <= 0) {
-        alert('Please enter a valid positive number for conversion factor');
+        kioskAlert('Please enter a valid positive number for conversion factor');
         if (conversionFactorInput) conversionFactorInput.focus();
         return;
     }
@@ -6649,7 +6741,7 @@ async function saveFactorySettings() {
             ? window.currentUser
             : (typeof getCurrentRole === 'function' ? getCurrentRole() : null);
         if (!canPerformAction(roleOrUser, 'factory-settings', 'save')) {
-            alert('You do not have permission to save factory settings.');
+            kioskAlert('You do not have permission to save factory settings.');
             return;
         }
     }
@@ -6691,12 +6783,12 @@ async function saveFactorySettings() {
 
         // Validate required fields
         if (!companyName || !companyLocation) {
-            alert('Company Name and Location are required');
+            kioskAlert('Company Name and Location are required');
             return;
         }
 
         if (![300, 500, 800].includes(loadCellRange)) {
-            alert('Load Cell Range must be 300, 500, or 800 N');
+            kioskAlert('Load Cell Range must be 300, 500, or 800 N');
             return;
         }
 
@@ -6746,7 +6838,7 @@ async function saveFactorySettings() {
                         try { await initFactorySettings(); } catch (e) { /* ignore */ }
                     }
 
-                    alert('Factory settings saved successfully');
+                    kioskAlert('Factory settings saved successfully');
                     _navigatingAfterSave = true;
                     setTimeout(() => {
                         goToPage('settings');
@@ -6754,7 +6846,7 @@ async function saveFactorySettings() {
 
                 } catch (e) {
                     console.error('[Factory Settings] Error saving factory settings:', e);
-                    alert('Failed to save factory settings: ' + (e && e.message ? e.message : 'Unknown error'));
+                    kioskAlert('Failed to save factory settings: ' + (e && e.message ? e.message : 'Unknown error'));
                 }
             },
             true,   
@@ -6762,7 +6854,7 @@ async function saveFactorySettings() {
         );
     } catch (e) {
         console.error('[Factory Settings] Error saving factory settings:', e);
-        alert('Failed to save factory settings: ' + (e && e.message ? e.message : 'Unknown error'));
+        kioskAlert('Failed to save factory settings: ' + (e && e.message ? e.message : 'Unknown error'));
     }
 }
 
@@ -6805,6 +6897,8 @@ async function updateFactorySettingsDisplays() {
 var factoryAutoLogoutMinutes = 0;
 var _autoLogoutLastActivityMs = 0;
 var _autoLogoutIntervalId = null;
+var _autoLogoutListenersAttached = false;
+var _autoLogoutActivityThrottleMs = 0;
 var biometricEnabledSetting = true;
 
 function normalizeBiometricEnabled(v) {
@@ -6829,18 +6923,79 @@ function applyFactoryAutoLogoutSetting(settings) {
     if (isNaN(n) || n < 0) n = 0;
     factoryAutoLogoutMinutes = Math.min(10080, n);
     if (settings) applyBiometricSetting(settings.biometricEnabled);
+    if (factoryAutoLogoutMinutes < 1) {
+        stopAutoLogoutWatcher();
+        return;
+    }
+    markAutoLogoutActivity();
     ensureAutoLogoutWatcher();
 }
 
-function isAutoLogoutRunBlocked() {
-    try { if (typeof isTestRunActive === 'function' && isTestRunActive()) return true; } catch (e) {}
-    if (window.validationInProgress) return true;
-    if (window.calibrationInProgress) return true;
-    if (typeof hasActiveReportApprovalGate === 'function' && hasActiveReportApprovalGate()) return true;
+function isKioskExportInProgress() {
+    if (window._kioskExportInProgress === true) return true;
+    try {
+        var overlay = document.getElementById('loading-modal');
+        if (overlay && overlay.style.display && overlay.style.display !== 'none') {
+            var titleEl = document.getElementById('loading-modal-title');
+            var title = titleEl ? String(titleEl.textContent || '').toLowerCase() : '';
+            if (title.indexOf('export') !== -1) return true;
+        }
+    } catch (e) {}
     return false;
 }
 
-function markAutoLogoutActivity() { _autoLogoutLastActivityMs = Date.now(); }
+function beginKioskExportGuard() {
+    window._kioskExportInProgress = true;
+    markAutoLogoutActivity();
+}
+
+function endKioskExportGuard() {
+    window._kioskExportInProgress = false;
+    markAutoLogoutActivity();
+}
+
+function isAutoLogoutRunBlocked() {
+    // Hardness: use isOperationRunning (testRunActive + val/cal flags).
+    try {
+        if (typeof isOperationRunning === 'function' && isOperationRunning()) return true;
+    } catch (e) {}
+    try {
+        if (typeof testRunActive !== 'undefined' && testRunActive) return true;
+    } catch (e) {}
+    try {
+        if (typeof isValidationOrCalibrationRunning === 'function' && isValidationOrCalibrationRunning()) return true;
+    } catch (e) {}
+    if (typeof hasActiveReportApprovalGate === 'function' && hasActiveReportApprovalGate()) return true;
+    // Do not auto-logout while USB/report/audit export is running.
+    if (isKioskExportInProgress()) return true;
+    return false;
+}
+
+function markAutoLogoutActivity() {
+    _autoLogoutLastActivityMs = Date.now();
+}
+
+/** High-frequency activity (scroll/touchmove) — still resets idle timer like phone screen-off. */
+function markAutoLogoutActivityThrottled() {
+    var now = Date.now();
+    if (now - _autoLogoutActivityThrottleMs < 400) return;
+    _autoLogoutActivityThrottleMs = now;
+    markAutoLogoutActivity();
+}
+
+function ensureAutoLogoutListeners() {
+    if (_autoLogoutListenersAttached) return;
+    _autoLogoutListenersAttached = true;
+    var opts = { capture: true, passive: true };
+    // Discrete interactions (tap / click / key) — same as phone wake.
+    ['pointerdown', 'touchstart', 'click', 'keydown'].forEach(function (ev) {
+        document.addEventListener(ev, markAutoLogoutActivity, opts);
+    });
+    // Continuous interaction while finger is down / scrolling.
+    ['touchmove', 'pointermove', 'wheel', 'scroll'].forEach(function (ev) {
+        document.addEventListener(ev, markAutoLogoutActivityThrottled, opts);
+    });
+}
 
 function stopAutoLogoutWatcher() {
     if (_autoLogoutIntervalId != null) {
@@ -6850,16 +7005,18 @@ function stopAutoLogoutWatcher() {
 }
 
 function ensureAutoLogoutWatcher() {
+    ensureAutoLogoutListeners();
     if (!window.currentUser || !(window.currentUser.username || window.currentUser.name)) {
         stopAutoLogoutWatcher();
         return;
     }
-    if (_autoLogoutIntervalId != null) return;
+    if (factoryAutoLogoutMinutes < 1) {
+        stopAutoLogoutWatcher();
+        return;
+    }
     markAutoLogoutActivity();
+    if (_autoLogoutIntervalId != null) return;
     _autoLogoutIntervalId = setInterval(autoLogoutTick, 10000);
-    ['click', 'touchstart', 'keydown', 'pointerdown'].forEach(function (evt) {
-        document.addEventListener(evt, markAutoLogoutActivity, true);
-    });
 }
 
 function autoLogoutTick() {
@@ -6867,16 +7024,19 @@ function autoLogoutTick() {
         stopAutoLogoutWatcher();
         return;
     }
+    // Never auto-logout while test / validation / calibration / export is active.
     if (isAutoLogoutRunBlocked()) { markAutoLogoutActivity(); return; }
     if (factoryAutoLogoutMinutes < 1) return;
     if (Date.now() - _autoLogoutLastActivityMs >= factoryAutoLogoutMinutes * 60000) {
+        // Re-check immediately before firing (race with Start / export).
+        if (isAutoLogoutRunBlocked()) { markAutoLogoutActivity(); return; }
         stopAutoLogoutWatcher();
         performAutoLogoutDueToInactivity();
     }
 }
 
 function performAutoLogoutDueToInactivity() {
-    if (isAutoLogoutRunBlocked()) { markAutoLogoutActivity(); return; }
+    if (isAutoLogoutRunBlocked()) { markAutoLogoutActivity(); ensureAutoLogoutWatcher(); return; }
     var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
     var req = (typeof apiRequest === 'function')
         ? apiRequest(base + '/api/data/auth/logout', { method: 'POST', body: { reason: 'inactivity' } })
@@ -6888,7 +7048,7 @@ function performAutoLogoutDueToInactivity() {
     else if (typeof goToPage === 'function') goToPage('login');
     setTimeout(function () {
         if (typeof showAppModal === 'function') showAppModal('You were logged out due to inactivity.', 'Session');
-        else alert('You were logged out due to inactivity.');
+        else kioskAlert('You were logged out due to inactivity.');
     }, 200);
 }
 
@@ -7088,12 +7248,12 @@ function enableDisabledRecipe(recipeId) {
         }).then(function (r) { return r.json().then(function (b) { if (!r.ok) throw new Error(b.error || 'Enable failed'); return b; }); });
     Promise.resolve(req).then(function (res) {
         if (typeof showAppModal === 'function') showAppModal('Recipe re-enabled.', 'Recipes');
-        else alert('Recipe re-enabled.');
+        else kioskAlert('Recipe re-enabled.');
         loadDisableRecipes();
     }).catch(function (e) {
         var msg = (e && e.message) ? e.message : 'Enable failed';
         if (typeof showAppModal === 'function') showAppModal(msg, 'Recipes');
-        else alert(msg);
+        else kioskAlert(msg);
     });
 }
 
@@ -7168,7 +7328,7 @@ function submitExpiredPasswordReset() {
         document.getElementById('password-expired-new') || document.getElementById('pwd-reset-new') || {}).value || '';
     var p2 = (document.getElementById('expired-reset-confirm-password') ||
         document.getElementById('password-expired-confirm') || document.getElementById('pwd-reset-confirm') || {}).value || '';
-    if (!p1 || p1 !== p2) { alert('Passwords do not match.'); return; }
+    if (!p1 || p1 !== p2) { kioskAlert('Passwords do not match.'); return; }
     var endpoint = window._mandatoryPasswordResetPending
         ? '/api/data/auth/mandatory-password-reset'
         : '/api/data/auth/password-expired-reset';
@@ -7183,34 +7343,11 @@ function submitExpiredPasswordReset() {
       .then(function (res) {
         if (res.ok && res.body && (res.body.success || res.body.ok)) {
             window._mandatoryPasswordResetPending = false;
-            alert('Password updated. Please log in.');
+            kioskAlert('Password updated. Please log in.');
             if (typeof showLoginScreen === 'function') showLoginScreen();
             else if (typeof goToPage === 'function') goToPage('login');
         } else {
-            alert((res.body && (res.body.error || res.body.message)) || 'Password reset failed');
+            kioskAlert((res.body && (res.body.error || res.body.message)) || 'Password reset failed');
         }
-      }).catch(function (e) { alert(e.message || 'Password reset failed'); });
+      }).catch(function (e) { kioskAlert(e.message || 'Password reset failed'); });
 }
-
-document.addEventListener('DOMContentLoaded', function () {
-    function resetKioskSessionAndShowLogin() {
-        try { localStorage.removeItem('currentUser'); } catch (e) {}
-        window.currentUser = null;
-        if (typeof currentUser !== 'undefined') currentUser = null;
-        if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
-        window._lastReportPreview = null;
-        window._mandatoryPasswordResetPending = false;
-        var app = document.querySelector('.app-container');
-        if (app) app.classList.remove('report-approval-locked');
-        if (typeof clearSidebarInteractionLock === 'function') clearSidebarInteractionLock();
-        var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
-        var resetUrl = base + '/api/data/auth/session-ui-reset';
-        fetch(resetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-            .catch(function () {})
-            .finally(function () {
-                if (typeof showLoginScreen === 'function') showLoginScreen();
-                else if (typeof goToPage === 'function') goToPage('login');
-            });
-    }
-    resetKioskSessionAndShowLogin();
-});

@@ -1,13 +1,25 @@
 [Unit]
-Description=Mount internal kiosk USB and refresh API storage paths
-After=local-fs.target
+Description=Mount/repair internal kiosk USB (VFAT) for Hardness CFR
 DefaultDependencies=no
+After=local-fs-pre.target systemd-fsck-root.service
+After=media-usb_internal.mount
+Wants=media-usb_internal.mount
+Before=kiosk-bridge.service
+Conflicts=shutdown.target
+Before=shutdown.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash /opt/kiosk/scripts/kiosk_mount_internal_usb.sh
-ExecStartPost=/bin/bash -c 'if mountpoint -q /media/usb_internal; then systemctl try-restart kiosk-bridge.service; fi'
 RemainAfterExit=yes
+Environment=INTERNAL_USB_PATH=/media/usb_internal
+Environment=STORAGE_DIR=/media/usb_internal/storage
+Environment=REPORTS_DIR=/media/usb_internal/reports
+Environment=AUDIT_DB_DIR=/media/usb_internal/db
+Environment=INTERNAL_USB_PARTITION=/dev/sda1
+Environment=INTERNAL_USB_UUID=C09D-FF4F
+ExecStart=/bin/bash /opt/kiosk/scripts/kiosk_mount_internal_usb.sh
+ExecStop=/bin/bash /opt/kiosk/scripts/kiosk_repair_internal_usb.sh sync
+TimeoutStartSec=120
 
 [Install]
 WantedBy=multi-user.target

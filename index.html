@@ -18,8 +18,8 @@
     </script>
     <link rel="stylesheet" href="base.css">
     <link rel="stylesheet" href="layout.css?v=20260723l">
-    <link rel="stylesheet" href="components.css?v=20260723l">
-    <link rel="stylesheet" href="styles.css?v=20260723l">
+    <link rel="stylesheet" href="components.css?v=20260724m">
+    <link rel="stylesheet" href="styles.css?v=20260724m">
 </head>
 
 <body>
@@ -424,7 +424,7 @@
                                         <line x1="16" y1="3" x2="14" y2="21"></line>
                                     </svg>
                                     <input type="number" id="sample-size" class="input-field" value="" min="1" max="100" placeholder="Enter"
-                                        oninput="syncParameterSamplesMax()">
+                                        oninput="onSampleSizeInputChanged()" onchange="onSampleSizeInputChanged()" onblur="onSampleSizeInputChanged()">
                                 </div>
                             </div>
                             <div class="form-group">
@@ -776,9 +776,8 @@
                                     <span class="validation-card-unit">mm</span>
                                 </div>
                             </div>
-                            <div id="distance-validation-passfail-row" class="validation-actions-row" style="display: none;">
-                                <button class="btn btn-primary validation-action-btn" onclick="completeDistanceValidationPass()">Pass</button>
-                                <button class="btn btn-secondary validation-action-btn" onclick="completeDistanceValidationFail()">Fail</button>
+                            <div id="distance-validation-complete-row" class="validation-actions-row" style="display: none;">
+                                <button class="btn btn-primary validation-action-btn" onclick="completeDistanceValidationSave()">Complete &amp; Save</button>
                             </div>
                         </div>
                     </div>
@@ -2229,7 +2228,8 @@
             <h3 id="param-samples-modal-title" class="param-config-modal-title">Samples for Thickness</h3>
             <div class="param-config-modal-body">
                 <label>Number of samples</label>
-                <input type="number" id="param-samples-modal-input" class="input-field" value="" min="1" max="100" placeholder="Enter">
+                <input type="number" id="param-samples-modal-input" class="input-field" value="" min="1" max="100" placeholder="Enter"
+                    oninput="enforceMaxSampleSize100(this, { showModal: true })">
             </div>
             <div class="param-config-modal-buttons">
                 <button class="btn btn-secondary" onclick="closeParamSamplesModal()">Cancel</button>
@@ -2329,10 +2329,10 @@
     
     <script src="keyboard.js?v=20260720f"></script>
     <script src="rbac.js?v=20260723n"></script>
-    <script src="validation.js?v=20260723r"></script>
-        <script src="approval_biometric.js?v=20260723p"></script>
-    <script src="script.js?v=20260723q"></script>
-    <script src="profile_compliance.js?v=20260723o"></script>
+    <script src="approval_biometric.js?v=20260724n"></script>
+    <script src="validation.js?v=20260724n"></script>
+    <script src="script.js?v=20260724o"></script>
+    <script src="profile_compliance.js?v=20260724n"></script>
 </body>
 
 </html>

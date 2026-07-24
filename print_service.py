@@ -804,7 +804,7 @@ def _format_validation_calibration_text(report_data: Dict[str, Any], width: int 
             lines.append(f"  Min: {_non_negative_display(report_data.get('min'), 2)} g")
             lines.append(f"  Max: {_non_negative_display(report_data.get('max'), 2)} g")
             lines.append(f"  Mean: {_non_negative_display(report_data.get('mean'), 2)} g")
-            lines.append(f"  Validation Status: {report_data.get('status', '--')}")
+            lines.append(f"  Validation Status: {report_service.resolve_validation_result_status(report_data)}")
         else:
             lines.append("Distance Validation Details:")
             lines.append(f"  Gauge Value: {_non_negative_display(report_data.get('expectedGaugeBlock'), 2)} mm")
@@ -812,7 +812,7 @@ def _format_validation_calibration_text(report_data: Dict[str, Any], width: int 
             diff = report_data.get("difference")
             if diff is not None:
                 lines.append(f"  Difference: {diff:.2f} mm")
-            lines.append(f"  Validation Status: {report_data.get('status', '--')}")
+            lines.append(f"  Validation Status: {report_service.resolve_validation_result_status(report_data)}")
     else:
         subtype = str(report_data.get("calibrationSubtype") or test_data.get("calibrationSubtype") or "load").strip().lower()
         if subtype in ("distance-zero", "distance", "distance_zero", "distance-span"):
@@ -1357,22 +1357,48 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
     if statistics and stat_params:
         lines.append("")
         if thermal:
-            lines.append("Statistics:")
+            # Match on-screen preview statistics table (row labels × param columns),
+            # printed as one clean param block at a time for 32-col width.
+            lines.append("STATISTICS")
+            lines.append("-" * min(width, 32))
+            row_specs = [
+                ("SAMPLES", "count", "count"),
+                ("MEAN", "mean", "num"),
+                ("MAX", "max", "num"),
+                ("MIN", "min", "num"),
+                ("RANGE", "range", "num"),
+                ("Sabs", "std_dev", "num"),
+                ("Srel", "srel", "rsd"),
+            ]
+            label_w = 8
+
+            def _preview_stat_val(ps, key, kind):
+                if not ps:
+                    return EMPTY_STAT
+                raw = ps.get(key)
+                if raw is None or raw == "":
+                    return EMPTY_STAT
+                try:
+                    if kind == "count":
+                        return str(int(raw))
+                    n = float(raw) if not isinstance(raw, (int, float)) else float(raw)
+                    if kind == "rsd":
+                        return "{:.2f}%".format(n)
+                    return "{:.2f}".format(n)
+                except (TypeError, ValueError):
+                    return str(raw)[:8] or EMPTY_STAT
+
             for pname in stat_params:
                 ps = _get_ci(statistics, pname) if isinstance(_get_ci(statistics, pname), dict) else None
                 if not ps:
                     continue
-                c = ps.get("count", "--")
-                m = _format_stat_number(ps.get("mean")) if ps.get("mean") is not None else EMPTY_STAT
-                mx = _format_stat_number(ps.get("max")) if ps.get("max") is not None else EMPTY_STAT
-                mn = _format_stat_number(ps.get("min")) if ps.get("min") is not None else EMPTY_STAT
-                r = _format_stat_number(ps.get("range")) if ps.get("range") is not None else EMPTY_STAT
-                sabs = _format_stat_number(ps.get("std_dev")) if ps.get("std_dev") is not None else EMPTY_STAT
-                srel_val = ps.get("srel")
-                srel = _format_stat_rsd(srel_val) if srel_val is not None else EMPTY_STAT
-                # Remove indentation - start from left corner for thermal
-                lines.append(f"{pname}: n={c} M={m} Max={mx} Min={mn}")
-                lines.append(f"Rng={r} Sd={sabs} RSd={srel}")
+                lines.append(str(pname or "").upper()[:width])
+                for label, key, kind in row_specs:
+                    val = _preview_stat_val(ps, key, kind)
+                    # Label left, value right — same feel as preview table cells
+                    pad = max(1, width - label_w - len(val))
+                    lines.append("{}{}{}".format(label.ljust(label_w)[:label_w], " " * pad, val))
+                lines.append("-" * min(width, 32))
         else:
             # A4: Table format with separators
             lines.append(star_sep)

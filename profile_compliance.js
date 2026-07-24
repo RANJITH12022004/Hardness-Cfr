@@ -27,17 +27,29 @@ var editingMemberId = editingMemberId || null;
 var _auditLoadMessageTimers = _auditLoadMessageTimers || [];
 
 function showModalCompat(msg, title) {
-  if (typeof showAppModal === 'function') return showAppModal(msg, title);
+  if (typeof showAppModal === 'function') return showAppModal(msg, title || 'Notice');
   if (typeof showModal === 'function') {
-    if (showModal.length >= 3) showModal(title || 'Notice', msg, null, false);
-    else showModal(msg);
-    return;
+    return new Promise(function (resolve) {
+      if (showModal.length >= 3) showModal(title || 'Notice', msg, function () { resolve(true); }, false, false);
+      else { showModal(msg); resolve(true); }
+    });
   }
-  alert(msg);
+  console.warn('[kiosk] showModalCompat:', title || 'Notice', msg);
+  return Promise.resolve(true);
 }
 function showConfirmModalCompat(msg, title) {
-  if (typeof showConfirmModal === 'function') return showConfirmModal(msg, title);
-  return Promise.resolve(confirm((title ? title + ': ' : '') + msg));
+  if (typeof showConfirmModal === 'function') return showConfirmModal(msg, title || 'Confirm');
+  if (typeof showModal === 'function' && document.getElementById('generic-modal-overlay')) {
+    return new Promise(function (resolve) {
+      showModal(title || 'Confirm', msg, function (ok) { resolve(!!ok); }, true, true);
+    });
+  }
+  if (typeof showAppModal === 'function') {
+    // No cancel path available — treat as notice and cancel the destructive action.
+    return showAppModal(msg, title || 'Confirm').then(function () { return false; });
+  }
+  console.warn('[kiosk] showConfirmModalCompat (cancelled — no UI):', title || 'Confirm', msg);
+  return Promise.resolve(false);
 }
 function formatAuditDetailsText(details) {
   return (details == null || details === '') ? '' : String(details);
@@ -440,23 +452,73 @@ function confirmRoleChange(newRole) {
 
 function disableMember(id) {
     if (!id) return;
-    if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
-        var role = getCurrentRole();
-        if (!canPerformAction(role, 'user-delete', 'delete')) {
+    var actor = window.currentUser || null;
+    if (typeof canPerformAction === 'function') {
+        var who = actor || (typeof getCurrentRole === 'function' ? getCurrentRole() : null);
+        if (!canPerformAction(who, 'user-delete', 'delete')) {
             showModalCompat('You do not have permission to disable members.', 'Permission');
             return;
         }
     }
-    showConfirmModalCompat('Are you sure you want to disable this member?', 'Disable Member').then(function (ok) {
+    var target = null;
+    if (Array.isArray(membersCache)) {
+        for (var i = 0; i < membersCache.length; i++) {
+            if (membersCache[i] && Number(membersCache[i].id) === Number(id)) {
+                target = membersCache[i];
+                break;
+            }
+        }
+    }
+    if (target && typeof isProtectedFactoryUser === 'function' && isProtectedFactoryUser(target)) {
+        showModalCompat('The factory profile cannot be disabled.', 'Disable Member');
+        return;
+    }
+    var targetLabel = target
+        ? ((target.name || target.username || ('#' + id)) + (target.username ? ' (' + target.username + ')' : ''))
+        : ('member #' + id);
+    showConfirmModalCompat(
+        'Disable ' + targetLabel + '? An approver with Profile management permission must confirm.',
+        'Disable Member'
+    ).then(function (ok) {
         if (!ok) return;
-        apiRequest(API_BASE + '/api/data/members/' + id, { method: 'DELETE' })
-            .then(function () {
-                loadMembersAndRender();
-            })
-            .catch(function (err) {
-                console.error('Failed to disable member', err);
-                showModalCompat('Failed to disable member: ' + (err && err.message ? err.message : 'Unknown error'), 'Members');
+        var role = typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '';
+        var approvalP = Promise.resolve('');
+        if (role !== 'factory') {
+            if (typeof openApprovalVerifyModal !== 'function') {
+                showModalCompat('Approval verification UI is unavailable.', 'Disable Member');
+                return;
+            }
+            var opts = (typeof _approvalVerifyModalOptionsForUserAdmin === 'function')
+                ? _approvalVerifyModalOptionsForUserAdmin()
+                : {
+                    purpose: 'user_admin',
+                    titleText: 'Profile disable approval required',
+                    subtitleText: 'Enter credentials for a user with Profile management permission.',
+                    usernameLabelText: 'Approver username',
+                    usernamePlaceholder: 'Approver username',
+                    emptyCredentialsMessage: 'Enter approver username and password.'
+                };
+            approvalP = openApprovalVerifyModal(opts).then(function (token) {
+                return token || '';
             });
+        }
+        return approvalP.then(function (token) {
+            if (role !== 'factory' && !token) {
+                showModalCompat('Disable cancelled — approval is required.', 'Disable Member');
+                return;
+            }
+            var headers = token ? { 'X-Approval-Verify-Token': token } : {};
+            return apiRequest(API_BASE + '/api/data/members/' + id, {
+                method: 'DELETE',
+                headers: headers
+            }).then(function () {
+                showModalCompat('Member disabled successfully.', 'Disable Member');
+                loadMembersAndRender();
+            });
+        });
+    }).catch(function (err) {
+        console.error('Failed to disable member', err);
+        showModalCompat('Failed to disable member: ' + (err && err.message ? err.message : 'Unknown error'), 'Members');
     });
 }
 
@@ -942,8 +1004,10 @@ function exportAuditTrails() {
     if (toTs) filters.to = toTs;
 
     var titleText = 'Export Audit';
+    if (typeof beginKioskExportGuard === 'function') beginKioskExportGuard();
     _ensureExportApprovalToken().then(function (token) {
         if (role !== 'factory' && !token) {
+            if (typeof endKioskExportGuard === 'function') endKioskExportGuard();
             showModalCompat('Export cancelled — approval is required.', titleText);
             return;
         }
@@ -954,6 +1018,7 @@ function exportAuditTrails() {
             var devices = (data && data.devices) ? data.devices : [];
             if (!devices.length) {
                 hideLoadingOverlay();
+                if (typeof endKioskExportGuard === 'function') endKioskExportGuard();
                 showModalCompat('No external pendrive detected. Please connect a USB pendrive and try again.', titleText);
                 return;
             }
@@ -965,7 +1030,10 @@ function exportAuditTrails() {
                 pickPromise = pickPendrive(devices);
             }
             pickPromise.then(function (devicePath) {
-                if (!devicePath) return;
+                if (!devicePath) {
+                    if (typeof endKioskExportGuard === 'function') endKioskExportGuard();
+                    return;
+                }
                 showLoadingOverlay(titleText, 'Generating audit-trail PDF...', { cancellable: false, progress: true });
                 setLoadingProgress(25, 'Mounting pendrive...', devicePath);
                 setTimeout(function () { setLoadingProgress(60, 'Rendering audit-trail PDF...', ''); }, 600);
@@ -980,22 +1048,30 @@ function exportAuditTrails() {
                             setLoadingProgress(100, 'Export complete', '');
                             setTimeout(function () {
                                 hideLoadingOverlay();
+                                if (typeof endKioskExportGuard === 'function') endKioskExportGuard();
                                 showModalCompat('Audit trail export successful.', titleText);
                             }, 350);
                         }, 250);
                     } else {
                         hideLoadingOverlay();
+                        if (typeof endKioskExportGuard === 'function') endKioskExportGuard();
                         showModalCompat(_friendlyExportError((res && res.error) || 'audit export failed'), titleText);
                     }
                 }).catch(function (err) {
                     hideLoadingOverlay();
+                    if (typeof endKioskExportGuard === 'function') endKioskExportGuard();
                     showModalCompat(_friendlyExportError(err), titleText);
                 });
+            }).catch(function () {
+                if (typeof endKioskExportGuard === 'function') endKioskExportGuard();
             });
         }).catch(function (err) {
             hideLoadingOverlay();
+            if (typeof endKioskExportGuard === 'function') endKioskExportGuard();
             showModalCompat(_friendlyExportError(err), titleText);
         });
+    }).catch(function () {
+        if (typeof endKioskExportGuard === 'function') endKioskExportGuard();
     });
 }
 

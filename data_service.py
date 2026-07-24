@@ -7,10 +7,13 @@ All data stored as JSON files under STORAGE_DIR.
 
 import hashlib
 import hmac
+import errno
 import json
+import logging
 import os
 import pathlib
 import secrets
+import subprocess
 import threading
 import time
 import uuid
@@ -26,6 +29,9 @@ _current_user = None
 _json_write_locks_guard = threading.Lock()
 _json_write_locks: Dict[str, threading.Lock] = {}
 _session_write_lock = threading.Lock()
+_storage_repair_lock = threading.Lock()
+_storage_repair_last_ts = 0.0
+_log = logging.getLogger(__name__)
 
 FACTORY_USERNAME = "RLERLT"
 FACTORY_PASSWORD = "Rahul"
@@ -115,9 +121,96 @@ def init(config):
     _config = dict(config)
     _storage_dir = pathlib.Path(_config.get("STORAGE_DIR", "./storage"))
     _reports_dir = pathlib.Path(_config.get("REPORTS_DIR", "./reports"))
-    _storage_dir.mkdir(parents=True, exist_ok=True)
-    _reports_dir.mkdir(parents=True, exist_ok=True)
-    _sync_factory_settings_storage()
+    try:
+        _storage_dir.mkdir(parents=True, exist_ok=True)
+        _reports_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _log.error("storage dirs unavailable at init (may be read-only): %s", e)
+    try:
+        _sync_factory_settings_storage()
+    except OSError as e:
+        # Errno 30 (EROFS) after USB dirty remount must not prevent API start —
+        # otherwise Chromium shows "site can't be reached".
+        _log.error("factory settings sync failed (storage may be read-only): %s", e)
+        if _is_erofs(e):
+            _try_repair_storage_once()
+            try:
+                _sync_factory_settings_storage()
+            except OSError as e2:
+                _log.error("factory settings sync still failing after repair: %s", e2)
+
+
+def _is_erofs(err: BaseException) -> bool:
+    if isinstance(err, OSError):
+        if err.errno in (errno.EROFS, errno.EIO, errno.ENODEV):
+            return True
+        msg = str(err).lower()
+        if "read-only" in msg or "errno 30" in msg:
+            return True
+    return False
+
+
+def _try_repair_storage_once(min_interval_sec: float = 45.0) -> bool:
+    """Best-effort VFAT repair via kiosk_repair_internal_usb.sh (rate-limited)."""
+    global _storage_repair_last_ts
+    now = time.time()
+    with _storage_repair_lock:
+        if (now - _storage_repair_last_ts) < min_interval_sec:
+            return False
+        _storage_repair_last_ts = now
+    script = pathlib.Path(
+        os.environ.get("KIOSK_REPAIR_SCRIPT", "/opt/kiosk/scripts/kiosk_repair_internal_usb.sh")
+    )
+    if not script.is_file():
+        return False
+    env = os.environ.copy()
+    try:
+        proc = subprocess.run(
+            ["sudo", "-n", "bash", str(script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if proc.returncode != 0:
+            proc = subprocess.run(
+                ["bash", str(script)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+        if proc.stderr:
+            _log.warning("storage repair: %s", proc.stderr.strip()[-500:])
+        return proc.returncode == 0
+    except Exception as e:
+        _log.warning("storage repair failed to run: %s", e)
+        return False
+
+
+def storage_is_writable() -> bool:
+    """True when STORAGE_DIR accepts creates (used by health / login diagnostics)."""
+    try:
+        base = _storage_dir or pathlib.Path(
+            os.environ.get("STORAGE_DIR", "/media/usb_internal/storage")
+        )
+        base.mkdir(parents=True, exist_ok=True)
+        probe = base / (".kiosk_rw_probe_%s" % os.getpid())
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+            f.flush()
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def ensure_storage_writable(repair: bool = True) -> bool:
+    if storage_is_writable():
+        return True
+    if repair and _try_repair_storage_once():
+        return storage_is_writable()
+    return False
 
 
 def _app_root_storage_dir() -> pathlib.Path:
@@ -280,8 +373,17 @@ def _save_json_file(filepath: pathlib.Path, data):
     VFAT + concurrent writers previously shared one ``*.json.tmp`` path, so one
     request could delete another's temp before ``os.replace`` → Errno 2 during
     report preview / session refresh.
+
+    On EROFS (USB remount-ro after dirty power-off), attempts one storage repair
+    then retries the write.
     """
-    filepath.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        if _is_erofs(e) and _try_repair_storage_once():
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            raise
     lock = _json_write_lock_for(filepath)
     payload = json.dumps(data, indent=2, ensure_ascii=False)
     with lock:
@@ -290,7 +392,8 @@ def _save_json_file(filepath: pathlib.Path, data):
         tmp_path = filepath.parent / tmp_name
         bak_path = filepath.with_suffix(filepath.suffix + ".bak")
         last_err = None
-        for attempt in range(3):
+        repaired = False
+        for attempt in range(4):
             try:
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     f.write(payload)
@@ -325,6 +428,11 @@ def _save_json_file(filepath: pathlib.Path, data):
                         tmp_path.unlink()
                 except OSError:
                     pass
+                if _is_erofs(e) and not repaired:
+                    repaired = True
+                    if _try_repair_storage_once():
+                        time.sleep(0.05)
+                        continue
                 time.sleep(0.02 * (attempt + 1))
         if last_err:
             raise last_err

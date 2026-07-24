@@ -1,7 +1,7 @@
 [Unit]
 Description=Tablet Hardness Tester kiosk API (Flask app.py)
-After=local-fs.target
-Wants=local-fs.target
+After=local-fs.target media-usb_internal.mount kiosk-internal-usb-mount.service
+Wants=local-fs.target media-usb_internal.mount kiosk-internal-usb-mount.service
 
 [Service]
 Type=simple
@@ -13,6 +13,7 @@ Environment=STORAGE_DIR=/media/usb_internal/storage
 Environment=REPORTS_DIR=/media/usb_internal/reports
 Environment=AUDIT_DB_DIR=/media/usb_internal/db
 Environment=INTERNAL_USB_UUIDS=C09D-FF4F
+Environment=INTERNAL_USB_UUID=C09D-FF4F
 Environment=INTERNAL_USB_PKNAME=sda
 Environment=INTERNAL_USB_PARTITION=/dev/sda1
 Environment=SCALE_PORT=/dev/ttyAMA5
@@ -20,14 +21,20 @@ Environment=SCALE_BAUD=9600
 WorkingDirectory=/opt/kiosk
 
 ExecStartPre=/bin/bash /opt/kiosk/scripts/kiosk_harden_permissions.sh
-ExecStartPre=/bin/bash /opt/kiosk/scripts/kiosk_mount_internal_usb.sh
+# "+" = run as root so RO vfat can be fsck'd/remounted before API start
+ExecStartPre=+/bin/bash /opt/kiosk/scripts/kiosk_mount_internal_usb.sh
 ExecStartPre=/bin/bash /opt/kiosk/scripts/kiosk_pre_start_port.sh
 ExecStartPre=/bin/bash /opt/kiosk/scripts/kiosk_rtc_boot.sh
 
 ExecStart=/bin/bash /opt/kiosk/run_kiosk_app.sh
+# Flush VFAT metadata on clean stop (reduces dirty-bit after orderly shutdown)
+ExecStop=+/bin/bash /opt/kiosk/scripts/kiosk_repair_internal_usb.sh sync
+ExecStopPost=+/bin/sync
+
 Restart=always
 RestartSec=3
-TimeoutStopSec=5
+TimeoutStartSec=180
+TimeoutStopSec=15
 KillMode=mixed
 
 StandardOutput=append:/home/rle/kiosk_bridge.log

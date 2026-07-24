@@ -1264,7 +1264,18 @@ def _format_report_audit_details(report_id, enriched):
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok"}), 200
+    storage_ok = False
+    try:
+        storage_ok = bool(data_service.storage_is_writable())
+    except Exception:
+        storage_ok = False
+    status = "ok" if storage_ok else "degraded"
+    code = 200 if storage_ok else 503
+    return jsonify({
+        "status": status,
+        "storageWritable": storage_ok,
+        "storageDir": os.environ.get("STORAGE_DIR", ""),
+    }), code
 
 
 @app.route("/")
@@ -1767,6 +1778,7 @@ def approve_report(report_id):
         by_line = verified_name
         report["reportApprovalStatus"] = "approved"
         report["approvalPassFail"] = pf
+        report["status"] = pf
         report["approvalRemarks"] = remarks
         report["approvedBy"] = by_line
         report["approvedByUsername"] = verified_username
@@ -1778,6 +1790,7 @@ def approve_report(report_id):
         if isinstance(td, dict):
             td = dict(td)
             td["approvalPassFail"] = pf
+            td["status"] = pf
             td["approvedBy"] = by_line
             td["approvedByUsername"] = verified_username
             td["approvedByEmployeeId"] = verified_username or "--"
@@ -1793,11 +1806,28 @@ def approve_report(report_id):
             pdf_ok = _generate_report_pdf_file(report_id, write_audit=False)
         except Exception:
             app.logger.exception("Approved-report PDF generation failed for id %s", report_id)
-        if (report.get("type") or "").strip().lower() == "validation":
+        rtype = (report.get("type") or "").strip().lower()
+        if pf == "PASS" and rtype in ("validation", "calibration"):
             try:
-                report_service.sync_factory_validation_dates()
+                applied = report_service.apply_pending_validation_due_dates(report)
+                if applied:
+                    _audit(
+                        None,
+                        None,
+                        "Validation due dates updated",
+                        "last={} next={} | months={} | report {}".format(
+                            applied.get("lastValidationDate") or "--",
+                            applied.get("nextValidationDate") or "--",
+                            applied.get("months") or "--",
+                            report_id,
+                        ),
+                    )
+                    # Clear stash so re-approve paths do not re-apply
+                    if report.get("pendingValidationDue") is not None:
+                        report.pop("pendingValidationDue", None)
+                        data_service.save_report(report)
             except Exception:
-                app.logger.exception("Failed to sync factory validation dates after validation approval")
+                app.logger.exception("Failed to apply pending validation due dates after approval")
         if pdf_ok:
             _audit_report_pdf_generated(report_id, report)
         ctx = _format_report_audit_details(report_id, report)
@@ -2093,34 +2123,91 @@ def delete_member(member_id):
         member = data_service.get_member(member_id)
         if not member:
             return jsonify({"error": "Member not found"}), 404
-        verified, verify_err = _require_user_admin_verification()
-        if not verified:
-            _audit_event(
-                action="User disable",
-                outcome="denied",
-                entity_type="member",
-                entity_id=member_id,
-                entity_name=member.get("username") or member.get("name") or "",
-                details=verify_err or "Approval verification required",
-                target_user=member.get("username") or "",
-                before=member,
-            )
-            return jsonify({"error": verify_err}), 403
+        target_username = (member.get("username") or "").strip()
+        target_name = (member.get("name") or target_username or "").strip() or "--"
+        if str(target_username).strip().upper() == data_service.FACTORY_USERNAME.upper():
+            return jsonify({"error": "The factory profile cannot be disabled."}), 403
+
+        actor = _audit_actor()
+        disabler_username = (actor.get("user") or "").strip() or "--"
+        disabler_name = (actor.get("name") or disabler_username).strip() or "--"
+        disabler_role = (actor.get("role") or "").strip() or "--"
+
+        role = _effective_request_role()
+        verified = None
+        if role == "factory":
+            verified = {
+                "username": disabler_username if disabler_username != "--" else data_service.FACTORY_USERNAME,
+                "name": disabler_name,
+                "role": "factory",
+            }
+        else:
+            verified, verify_err = _require_user_admin_verification()
+            if not verified:
+                _audit_event(
+                    action="User disable",
+                    outcome="denied",
+                    entity_type="member",
+                    entity_id=member_id,
+                    entity_name=target_username or target_name,
+                    details=verify_err or "Approval verification required",
+                    target_user=target_username,
+                    before=member,
+                    extra={
+                        "disabledMember": target_username or target_name,
+                        "requestedBy": disabler_username,
+                    },
+                )
+                return jsonify({"error": verify_err or "Approval verification is required."}), 403
+            verifier_un = _norm_username(verified.get("username"))
+            if verifier_un and verifier_un == _norm_username(disabler_username) and role != "factory":
+                _audit_event(
+                    action="User disable",
+                    outcome="denied",
+                    entity_type="member",
+                    entity_id=member_id,
+                    entity_name=target_username or target_name,
+                    details="Requester cannot approve their own disable action",
+                    target_user=target_username,
+                    before=member,
+                    signature={
+                        "mode": "password_reconfirm",
+                        "username": verified.get("username"),
+                        "role": verified.get("role"),
+                    },
+                )
+                return jsonify({"error": "Approver must be a different user with Profile management permission."}), 403
+
+        approver_username = (verified.get("username") or "").strip() or "--"
+        approver_name = (verified.get("name") or approver_username).strip() or "--"
+        approver_role = (verified.get("role") or "").strip() or "--"
         before_member = dict(member)
         template_id = member.get("fingerprintTemplateId")
         if template_id is not None:
             deleted = biometric_service.delete_template(template_id)
             if not deleted.get("ok"):
+                detail = (
+                    "Disable failed (fingerprint): member {} ({}) | requested by {} ({}) | "
+                    "approver {} ({}) | {}"
+                ).format(
+                    target_name,
+                    target_username or "--",
+                    disabler_name,
+                    disabler_username,
+                    approver_name,
+                    approver_username,
+                    deleted.get("error") or "sensor template delete failed",
+                )
                 _audit_event(
                     action="User disable",
                     outcome="failed",
                     entity_type="member",
                     entity_id=member_id,
-                    entity_name=member.get("username") or member.get("name") or "",
-                    details=deleted.get("error") or "Failed to delete fingerprint template from sensor",
-                    target_user=member.get("username") or "",
+                    entity_name=target_username or target_name,
+                    details=detail,
+                    target_user=target_username,
                     before=before_member,
-                    signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
+                    signature={"mode": "password_reconfirm", "username": approver_username, "role": approver_role},
                     extra={"templateId": template_id},
                 )
                 return jsonify({
@@ -2129,19 +2216,42 @@ def delete_member(member_id):
                 }), 400
             data_service.clear_member_biometric(member_id)
         member = data_service.disable_member(member_id)
+        detail = (
+            "Member disabled: {} ({}) | disabled by: {} ({}) | approved by: {} ({})"
+        ).format(
+            target_name,
+            target_username or "--",
+            disabler_name,
+            disabler_username,
+            approver_name,
+            approver_username,
+        )
         _audit_event(
             action="User disable",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
-            entity_name=member.get("username") or member.get("name") or "",
-            details="Member disabled",
-            target_user=member.get("username") or "",
+            entity_name=target_username or target_name,
+            details=detail,
+            target_user=target_username,
             before=before_member,
             after=member,
-            signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
-            extra={"templateIdFreed": template_id},
+            signature={"mode": "password_reconfirm", "username": approver_username, "role": approver_role},
+            extra={
+                "templateIdFreed": template_id,
+                "disabledMemberUsername": target_username,
+                "disabledMemberName": target_name,
+                "disabledByUsername": disabler_username,
+                "disabledByName": disabler_name,
+                "disabledByRole": disabler_role,
+                "approvedByUsername": approver_username,
+                "approvedByName": approver_name,
+                "approvedByRole": approver_role,
+            },
         )
+        # Clear human-readable trail rows (who disabled / who / who approved).
+        _audit(disabler_username, disabler_role, "User disabled", detail)
+        _audit(approver_username, approver_role, "User disable approved", detail)
         return jsonify({"success": True, "member": member}), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -2234,14 +2344,125 @@ def get_factory_settings():
 @app.route("/api/data/factory-settings", methods=["POST"])
 def save_factory_settings():
     try:
+        # Factory settings UI writes are factory-role only (Admin/Supervisor cannot change).
+        if _effective_request_role() != "factory":
+            return jsonify({"error": "Forbidden. Factory role required to change factory settings."}), 403
         settings = request.get_json(force=True, silent=True) or {}
+        if not isinstance(settings, dict):
+            settings = {}
+        before = data_service.get_factory_settings() or {}
         data_service.save_factory_settings(settings)
         saved = data_service.get_factory_settings() or {}
-        _audit(None, None, "Factory settings changed", "")
+        date_keys = {"lastValidationDate", "nextValidationDate"}
+        changed = []
+        for key in set(list(before.keys()) + list(saved.keys())):
+            if before.get(key) != saved.get(key):
+                changed.append(key)
+        non_date_changed = [k for k in changed if k not in date_keys]
+        date_changed = [k for k in changed if k in date_keys]
+        if non_date_changed:
+            _audit(
+                None,
+                None,
+                "Factory settings changed",
+                "Changed: {}".format(", ".join(sorted(non_date_changed))),
+            )
+        elif date_changed:
+            # Dates-only writes via this route (legacy); prefer validation-dates API.
+            _audit(
+                None,
+                None,
+                "Validation due dates updated",
+                "last={} next={}".format(
+                    saved.get("lastValidationDate") or "--",
+                    saved.get("nextValidationDate") or "--",
+                ),
+            )
         return jsonify({"success": True, "settings": saved}), 200
     except Exception as e:
         app.logger.exception("Error saving factory settings")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/factory-settings/validation-dates", methods=["POST"])
+def save_validation_due_dates():
+    """Persist last/next validation due dates without a Factory Settings audit."""
+    try:
+        gate = _require_any_session_internal(
+            ["validation-test", "calibration-menu", "validation-report-approve", "calibration-report-approve"],
+            "Forbidden. You do not have permission to update validation due dates.",
+        )
+        if gate:
+            return gate
+        body = request.get_json(force=True, silent=True) or {}
+        last = str(body.get("lastValidationDate") or "").strip()
+        nxt = str(body.get("nextValidationDate") or "").strip()
+        if not last or not nxt:
+            return jsonify({"ok": False, "error": "lastValidationDate and nextValidationDate are required"}), 400
+        stored = data_service.get_factory_settings() or {}
+        before_last = stored.get("lastValidationDate")
+        before_next = stored.get("nextValidationDate")
+        updated = dict(stored)
+        updated["lastValidationDate"] = last
+        updated["nextValidationDate"] = nxt
+        data_service.save_factory_settings(updated)
+        if before_last != last or before_next != nxt:
+            _audit(
+                None,
+                None,
+                "Validation due dates updated",
+                "last {} -> {} | next {} -> {}".format(
+                    before_last or "--", last, before_next or "--", nxt
+                ),
+            )
+        saved = data_service.get_factory_settings() or {}
+        return jsonify({
+            "ok": True,
+            "lastValidationDate": saved.get("lastValidationDate"),
+            "nextValidationDate": saved.get("nextValidationDate"),
+        }), 200
+    except Exception as e:
+        app.logger.exception("Error saving validation due dates")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/data/reports/<int:report_id>/pending-due", methods=["POST"])
+def set_report_pending_validation_due(report_id):
+    """Stash operator-chosen 3/6/12 due dates on the report until approval Pass."""
+    try:
+        gate = _require_any_session_internal(
+            ["validation-test", "calibration-menu"],
+            "Forbidden. You do not have permission to set validation due dates.",
+        )
+        if gate:
+            return gate
+        report = data_service.get_report(report_id)
+        if not report:
+            return jsonify({"ok": False, "error": "Report not found"}), 404
+        rtype = str(report.get("type") or "").strip().lower()
+        if rtype not in ("validation", "calibration"):
+            return jsonify({"ok": False, "error": "Only validation/calibration reports accept pending due dates"}), 400
+        body = request.get_json(force=True, silent=True) or {}
+        try:
+            months = int(body.get("months") or 0)
+        except (TypeError, ValueError):
+            months = 0
+        if months not in (3, 6, 12):
+            return jsonify({"ok": False, "error": "months must be 3, 6, or 12"}), 400
+        last = str(body.get("lastValidationDate") or "").strip()
+        nxt = str(body.get("nextValidationDate") or "").strip()
+        if not last or not nxt:
+            return jsonify({"ok": False, "error": "lastValidationDate and nextValidationDate are required"}), 400
+        report["pendingValidationDue"] = {
+            "months": months,
+            "lastValidationDate": last,
+            "nextValidationDate": nxt,
+        }
+        data_service.save_report(report)
+        return jsonify({"ok": True, "pendingValidationDue": report["pendingValidationDue"]}), 200
+    except Exception as e:
+        app.logger.exception("Error setting pending validation due")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/data/factory-reset", methods=["POST"])
@@ -2423,6 +2644,24 @@ def login():
                 "remainingAttempts": remaining
             }), 401
         return jsonify({"error": "Invalid username or password"}), 401
+    except OSError as e:
+        app.logger.exception("Error during login (storage)")
+        # Auto-repair once for remount-ro, then ask user to retry.
+        try:
+            if data_service.ensure_storage_writable(repair=True):
+                return jsonify({
+                    "error": "Storage recovered after a power interruption. Please try login again.",
+                    "storageRepaired": True,
+                }), 503
+        except Exception:
+            pass
+        msg = str(e)
+        if "read-only" in msg.lower() or getattr(e, "errno", None) == 30:
+            return jsonify({
+                "error": "Internal storage is read-only (power interruption). Wait a moment and retry.",
+                "storageReadOnly": True,
+            }), 503
+        return jsonify({"error": msg}), 500
     except Exception as e:
         app.logger.exception("Error during login")
         return jsonify({"error": str(e)}), 500
@@ -2677,7 +2916,15 @@ def logout():
         reason = str(payload.get("reason") or "user").strip().lower()
         user = data_service.get_current_user()
         if user:
-            _audit_session_logout(user, reason, request_source="POST /api/data/auth/logout")
+            # Debounce duplicate logout posts within 2s (parallel callers).
+            un = (user.get("username") or user.get("name") or "").strip().lower()
+            now_ms = int(time.time() * 1000)
+            last = getattr(app, "_last_logout_audit", {}) or {}
+            prev = last.get(un) or 0
+            if not un or (now_ms - int(prev)) > 2000:
+                _audit_session_logout(user, reason, request_source="POST /api/data/auth/logout")
+                last[un or "_"] = now_ms
+                app._last_logout_audit = last
         data_service.touch_app_clean_stop_flag()
         data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
@@ -2697,11 +2944,18 @@ def session_ui_reset():
     try:
         user = data_service.get_current_user()
         if user:
-            _audit_session_logout(
-                user,
-                "power_interruption",
-                request_source="POST /api/data/auth/session-ui-reset",
-            )
+            un = (user.get("username") or user.get("name") or "").strip().lower()
+            now_ms = int(time.time() * 1000)
+            last = getattr(app, "_last_session_ui_reset_audit", {}) or {}
+            prev = last.get(un) or 0
+            if not un or (now_ms - int(prev)) > 2000:
+                _audit_session_logout(
+                    user,
+                    "power_interruption",
+                    request_source="POST /api/data/auth/session-ui-reset",
+                )
+                last[un or "_"] = now_ms
+                app._last_session_ui_reset_audit = last
         data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
         return jsonify({"success": True}), 200
@@ -3809,12 +4063,15 @@ def get_report_preview(report_id):
         if not report:
             return jsonify({"error": "Report not found"}), 404
         rtype = (report.get("type") or "").strip().lower() or "report"
-        _audit(
-            None,
-            None,
-            "Report preview viewed",
-            "Report id {} | type {}".format(report_id, rtype),
-        )
+        # Audit intentional opens only (polls and silent refreshes pass audit=0 / omit).
+        audit_flag = str(request.args.get("audit") or "0").strip().lower()
+        if audit_flag in ("1", "true", "yes"):
+            _audit(
+                None,
+                None,
+                "Report preview viewed",
+                "Report id {} | type {}".format(report_id, rtype),
+            )
         preview_data = report_service.get_report_preview_data(report)
         return jsonify({"preview": preview_data}), 200
     except Exception as e:
@@ -3919,7 +4176,9 @@ def save_report_pdf(report_id):
                 "success": False,
                 "error": "PDF is available only after the report is approved or marked aborted.",
             }), 403
-        if not _generate_report_pdf_file(report_id, write_audit=True):
+        # Approve path already audits PDF generation; client silent save must not double-audit.
+        already_exists = _report_pdf_path(report_id).exists()
+        if not _generate_report_pdf_file(report_id, write_audit=not already_exists):
             return jsonify({"success": False, "error": "PDF generation failed"}), 500
         out_path = _report_pdf_path(report_id)
         return jsonify({"success": True, "path": str(out_path), "size_bytes": out_path.stat().st_size}), 200
@@ -4549,9 +4808,10 @@ def test_hardness():
 
 @app.route("/api/hardware/test/home", methods=["POST"])
 def test_home():
-    gate = _hw_gate()
-    if gate:
-        return gate
+    # Any logged-in profile may home the axis (used on login + abort). Do not require test/cal cards.
+    err = _require_auth()
+    if err:
+        return err
     result = hardware_service.send_command("T,HOME*")
     return jsonify(result)
 

@@ -11,34 +11,160 @@ function closeAppModal() {
     }
 }
 
+/**
+ * App-native message modal (never uses window.alert).
+ * @returns {Promise<boolean>}
+ */
 function showAppModal(message, title, onClose) {
-    var overlay = document.getElementById('app-modal-overlay');
-    var titleEl = document.getElementById('app-modal-title');
-    var msgEl = document.getElementById('app-modal-message');
-    var buttonsEl = document.getElementById('app-modal-buttons');
-    if (!overlay || !titleEl || !msgEl || !buttonsEl) {
-        window.alert(message);
-        if (typeof onClose === 'function') onClose();
-        return;
-    }
-    titleEl.textContent = title || 'Message';
-    msgEl.textContent = message || '';
-    buttonsEl.innerHTML = '';
-    var okBtn = document.createElement('button');
-    okBtn.type = 'button';
-    okBtn.className = 'btn-role-select btn-role-user';
-    okBtn.textContent = 'OK';
-    okBtn.onclick = function () {
+    return new Promise(function (resolve) {
+        var overlay = document.getElementById('app-modal-overlay');
+        var titleEl = document.getElementById('app-modal-title');
+        var msgEl = document.getElementById('app-modal-message');
+        var buttonsEl = document.getElementById('app-modal-buttons');
+        var text = message == null ? '' : String(message);
+
+        function finish(ok) {
+            if (appModalResolve === resolve) appModalResolve = null;
+            if (overlay) overlay.style.display = 'none';
+            if (typeof onClose === 'function') {
+                try { onClose(); } catch (e) { /* ignore */ }
+            }
+            resolve(!!ok);
+        }
+
+        // Prefer generic modal if app-modal DOM is missing
+        if (!overlay || !titleEl || !msgEl || !buttonsEl) {
+            if (typeof showModal === 'function' && document.getElementById('generic-modal-overlay')) {
+                showModal(title || 'Message', text, function () { finish(true); }, false, false);
+                return;
+            }
+            console.warn('[kiosk] showAppModal:', title || 'Message', text);
+            finish(true);
+            return;
+        }
+
+        if (appModalResolve && appModalResolve !== resolve) {
+            try { appModalResolve(false); } catch (e) { /* ignore */ }
+        }
+        appModalResolve = resolve;
+        titleEl.textContent = title || 'Message';
+        msgEl.textContent = text;
+        buttonsEl.innerHTML = '';
+        var okBtn = document.createElement('button');
+        okBtn.type = 'button';
+        okBtn.className = 'btn-role-select btn-role-user';
+        okBtn.textContent = 'OK';
+        okBtn.onclick = function () { finish(true); };
+        buttonsEl.appendChild(okBtn);
+        overlay.style.display = 'flex';
+        try { okBtn.focus(); } catch (e) { /* ignore */ }
+    });
+}
+
+/**
+ * App-native confirm modal (OK / Cancel). Never uses window.confirm.
+ * @returns {Promise<boolean>}
+ */
+function showConfirmModal(message, title, okLabel, cancelLabel) {
+    return new Promise(function (resolve) {
+        var text = message == null ? '' : String(message);
+        if (typeof showModal === 'function' && document.getElementById('generic-modal-overlay')) {
+            showModal(
+                title || 'Confirm',
+                text,
+                function (ok) { resolve(!!ok); },
+                true,
+                true,
+                okLabel || 'OK',
+                cancelLabel || 'Cancel'
+            );
+            return;
+        }
+        var overlay = document.getElementById('app-modal-overlay');
+        var titleEl = document.getElementById('app-modal-title');
+        var msgEl = document.getElementById('app-modal-message');
+        var buttonsEl = document.getElementById('app-modal-buttons');
+        if (!overlay || !titleEl || !msgEl || !buttonsEl) {
+            console.warn('[kiosk] showConfirmModal:', title || 'Confirm', text);
+            resolve(false);
+            return;
+        }
         if (appModalResolve) {
-            appModalResolve(true);
+            try { appModalResolve(false); } catch (e) { /* ignore */ }
             appModalResolve = null;
         }
-        overlay.style.display = 'none';
-        if (typeof onClose === 'function') onClose();
-    };
-    buttonsEl.appendChild(okBtn);
-    overlay.style.display = 'flex';
+        titleEl.textContent = title || 'Confirm';
+        msgEl.textContent = text;
+        buttonsEl.innerHTML = '';
+
+        function finish(ok) {
+            overlay.style.display = 'none';
+            resolve(!!ok);
+        }
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn-role-select btn-role-cancel';
+        cancelBtn.textContent = cancelLabel || 'Cancel';
+        cancelBtn.onclick = function () { finish(false); };
+
+        var okBtn = document.createElement('button');
+        okBtn.type = 'button';
+        okBtn.className = 'btn-role-select btn-role-user';
+        okBtn.textContent = okLabel || 'OK';
+        okBtn.onclick = function () { finish(true); };
+
+        buttonsEl.appendChild(cancelBtn);
+        buttonsEl.appendChild(okBtn);
+        overlay.style.display = 'flex';
+        try { okBtn.focus(); } catch (e) { /* ignore */ }
+    });
 }
+
+/** Preferred app alert — always uses in-app modal (never Chromium dialog). */
+function kioskAlert(message, title) {
+    if (typeof showAppModal === 'function') {
+        return showAppModal(String(message == null ? '' : message), title || 'Message');
+    }
+    if (typeof showModal === 'function' && document.getElementById('generic-modal-overlay')) {
+        return new Promise(function (resolve) {
+            showModal(title || 'Message', String(message == null ? '' : message), function () { resolve(true); }, false, false);
+        });
+    }
+    console.warn('[kioskAlert]', title || 'Message', message);
+    return Promise.resolve(true);
+}
+
+/** Preferred app confirm — Promise<boolean>; never window.confirm. */
+function kioskConfirm(message, title, okLabel, cancelLabel) {
+    if (typeof showConfirmModal === 'function') {
+        return showConfirmModal(String(message == null ? '' : message), title || 'Confirm', okLabel, cancelLabel);
+    }
+    if (typeof showConfirmModalCompat === 'function') {
+        return showConfirmModalCompat(String(message == null ? '' : message), title || 'Confirm');
+    }
+    console.warn('[kioskConfirm] unavailable — cancelling:', message);
+    return Promise.resolve(false);
+}
+
+/** Route browser alert/confirm to app modals (kiosk must never show Chromium dialogs). */
+function installKioskNativeDialogOverrides() {
+    if (window.__kioskDialogsInstalled) return;
+    window.__kioskDialogsInstalled = true;
+    window.alert = function (message) {
+        kioskAlert(message, 'Message');
+    };
+    // Native confirm is sync; app confirm is async. Prefer kioskConfirm/showConfirmModal at call sites.
+    window.confirm = function (message) {
+        kioskConfirm(String(message == null ? '' : message), 'Confirm');
+        return false;
+    };
+    window.prompt = function () {
+        console.warn('[kiosk] window.prompt is disabled; use an app form/modal.');
+        return null;
+    };
+}
+installKioskNativeDialogOverrides();
 
 
 var biometricEnabledSetting = true;
@@ -545,8 +671,16 @@ function guardReportPreviewNavigation(targetPage) {
             'This report is awaiting approval. Complete Pass/Fail and sign on this screen, or power off will save it as Aborted (power interruption).',
             'Report'
         );
+    } else if (typeof showModal === 'function') {
+        showModal(
+            'Report',
+            'This report is awaiting approval. Complete Pass/Fail and sign before leaving.',
+            null,
+            false,
+            false
+        );
     } else {
-        alert('This report is awaiting approval. Complete Pass/Fail and sign before leaving.');
+        console.warn('[kiosk] Report awaiting approval — stay on preview.');
     }
     var active = document.querySelector('.page.active');
     if (!active || active.id !== 'page-report-preview') {
@@ -977,6 +1111,18 @@ function _approvalVerifyModalOptionsForCalibrationStart() {
         usernameLabelText: 'Verifier username',
         usernamePlaceholder: 'Verifier username',
         emptyCredentialsMessage: 'Enter verifier username and password.'
+    };
+}
+
+/** Profile disable approval: verifier must have Profile management permission. */
+function _approvalVerifyModalOptionsForUserAdmin() {
+    return {
+        purpose: 'user_admin',
+        titleText: 'Profile disable approval required',
+        subtitleText: 'Enter credentials for a user with Profile management permission.',
+        usernameLabelText: 'Approver username',
+        usernamePlaceholder: 'Approver username',
+        emptyCredentialsMessage: 'Enter approver username and password.'
     };
 }
 

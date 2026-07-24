@@ -586,9 +586,31 @@ def _add_years(dt: datetime, years: int = 1) -> datetime:
         return dt.replace(month=2, day=28, year=dt.year + int(years or 1))
 
 
-def _validation_dates_from_last(dt: datetime) -> Dict[str, str]:
-    """Last validation date and next due exactly one calendar year later."""
-    next_dt = _add_years(dt, 1)
+def _validation_dates_from_last(dt: datetime, months: int = 12) -> Dict[str, str]:
+    """Last validation date and next due after the given interval (default 12 months)."""
+    try:
+        months_i = int(months or 12)
+    except (TypeError, ValueError):
+        months_i = 12
+    if months_i not in (3, 6, 12):
+        months_i = 12
+    if months_i == 12:
+        next_dt = _add_years(dt, 1)
+    else:
+        # Approximate months via calendar month add
+        month = dt.month - 1 + months_i
+        year = dt.year + month // 12
+        month = month % 12 + 1
+        day = dt.day
+        while True:
+            try:
+                next_dt = dt.replace(year=year, month=month, day=day)
+                break
+            except ValueError:
+                day -= 1
+                if day < 1:
+                    next_dt = _add_years(dt, 1)
+                    break
     return {
         "lastValidationDate": dt.strftime("%d-%m-%Y"),
         "nextValidationDate": next_dt.strftime("%d-%m-%Y"),
@@ -596,56 +618,125 @@ def _validation_dates_from_last(dt: datetime) -> Dict[str, str]:
 
 
 def _resolve_validation_dates(factory_settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-    """Single source for validation dates: latest validation report, else stored last; next always +1 year."""
+    """Display helper: prefer stored factory dates; else latest approved PASS validation."""
+    fs = factory_settings or data_service.get_factory_settings() or {}
+    last = str(fs.get("lastValidationDate") or "").strip()
+    nxt = str(fs.get("nextValidationDate") or "").strip()
+    if last and nxt:
+        return {"lastValidationDate": last, "nextValidationDate": nxt}
     try:
         computed = _compute_validation_dates_from_reports()
         if computed.get("lastValidationDate"):
             return computed
     except Exception as exc:
         print(f"[REPORT] Validation date compute failed: {exc}")
-    fs = factory_settings or {}
     last_dt = _parse_display_date(fs.get("lastValidationDate"))
     if last_dt:
-        return _validation_dates_from_last(last_dt)
+        return _validation_dates_from_last(last_dt, 12)
     return {}
 
 
+def apply_pending_validation_due_dates(report: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Persist stashed 3/6/12 due dates from an approved PASS validation/calibration report.
+
+    Writes via data_service only (no Factory Settings audit). Returns applied dates or {}.
+    """
+    if not isinstance(report, dict):
+        return {}
+    pending = report.get("pendingValidationDue")
+    if not isinstance(pending, dict):
+        return {}
+    last = str(pending.get("lastValidationDate") or "").strip()
+    nxt = str(pending.get("nextValidationDate") or "").strip()
+    if not last or not nxt:
+        return {}
+    stored = data_service.get_factory_settings() or {}
+    updated = dict(stored)
+    updated["lastValidationDate"] = last
+    updated["nextValidationDate"] = nxt
+    data_service.save_factory_settings(updated)
+    return {
+        "lastValidationDate": last,
+        "nextValidationDate": nxt,
+        "months": pending.get("months"),
+    }
+
+
 def sync_factory_validation_dates() -> Dict[str, str]:
-    """Persist resolved validation dates into factory settings storage."""
+    """Legacy helper: re-resolve display dates without forcing +1 year overwrite.
+
+    Prefer apply_pending_validation_due_dates() after approval Pass.
+    """
     stored = data_service.get_factory_settings() or {}
     dates = _resolve_validation_dates(stored)
-    if not dates:
-        return {}
-    updated = dict(stored)
-    updated["lastValidationDate"] = dates["lastValidationDate"]
-    updated["nextValidationDate"] = dates["nextValidationDate"]
-    data_service.save_factory_settings(updated)
-    return dates
+    return dates or {}
 
 
 def _compute_validation_dates_from_reports() -> Dict[str, str]:
+    """Latest approved PASS validation report; next due from pending stash or +12 months."""
     reports = data_service.list_reports("validation")
+    latest = None
     latest_dt = None
     for report in reports or []:
         if str(report.get("type") or "").strip().lower() != "validation":
             continue
-        td = report.get("testData") or {}
-        status_raw = str(td.get("status") or report.get("status") or "").strip().lower()
+        pf = str(report.get("approvalPassFail") or "").strip().upper()
+        st = str(report.get("reportApprovalStatus") or "").strip().lower()
+        status_raw = str(
+            (report.get("testData") or {}).get("status") or report.get("status") or ""
+        ).strip().lower()
         if status_raw == "aborted":
             continue
+        # Prefer approved PASS; fall back to legacy PASS status for old rows
+        if st == "approved" and pf == "PASS":
+            pass
+        elif pf == "PASS":
+            pass
+        elif str(report.get("status") or "").strip().upper() == "PASS" and st != "pending":
+            pass
+        else:
+            continue
         dt = _parse_report_datetime(
-            td.get("completedAt")
+            report.get("approvedAt")
+            or (report.get("testData") or {}).get("completedAt")
             or report.get("completedAt")
-            or td.get("createdAt")
             or report.get("createdAt")
         )
         if not dt:
             continue
         if latest_dt is None or dt > latest_dt:
             latest_dt = dt
-    if latest_dt is None:
+            latest = report
+    if latest_dt is None or latest is None:
         return {}
-    return _validation_dates_from_last(latest_dt)
+    pending = latest.get("pendingValidationDue") if isinstance(latest.get("pendingValidationDue"), dict) else {}
+    if pending.get("lastValidationDate") and pending.get("nextValidationDate"):
+        return {
+            "lastValidationDate": str(pending["lastValidationDate"]),
+            "nextValidationDate": str(pending["nextValidationDate"]),
+        }
+    months = pending.get("months") if pending else 12
+    return _validation_dates_from_last(latest_dt, months)
+
+
+def resolve_validation_result_status(report: Optional[Dict[str, Any]]) -> str:
+    """Single source of truth for validation Pass/Fail display."""
+    if not isinstance(report, dict):
+        return "--"
+    pf = str(report.get("approvalPassFail") or "").strip().upper()
+    if pf in ("PASS", "FAIL"):
+        return pf
+    st = str(report.get("reportApprovalStatus") or "").strip().lower()
+    if st == "pending":
+        return "Pending"
+    legacy = str(report.get("status") or "").strip().upper()
+    if legacy in ("PASS", "FAIL"):
+        return legacy
+    td = report.get("testData") if isinstance(report.get("testData"), dict) else {}
+    td_st = str((td or {}).get("status") or "").strip().upper()
+    if td_st in ("PASS", "FAIL"):
+        return td_st
+    return "--"
 
 
 def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
@@ -699,10 +790,10 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
             "expectedGaugeBlock",
             "distance",
             "difference",
-            "status",
         ):
             if report.get(key) is not None:
                 preview[key] = report.get(key)
+        preview["status"] = resolve_validation_result_status(report)
     elif report.get("type") == "calibration":
         preview["calibrationSubtype"] = report.get("calibrationSubtype")
         if report.get("status") is not None:
@@ -797,7 +888,7 @@ def _validation_details_table_html(preview: Dict[str, Any]) -> str:
         )
     else:
         subtype = preview.get("validationSubtype") or (td.get("validationSubtype") if isinstance(td, dict) else None) or "load"
-        status = preview.get("status") or (td.get("status") if isinstance(td, dict) else None) or "--"
+        status = resolve_validation_result_status(preview)
         if subtype == "load":
             rows.append(
                 "<tr><th>Expected Weight (g)</th><td>{}</td><th>Min (g)</th><td>{}</td></tr>".format(

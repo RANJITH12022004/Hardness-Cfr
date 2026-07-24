@@ -1,51 +1,67 @@
 #!/usr/bin/env bash
-# Ensure internal pendrive (sda1) is mounted at /media/usb_internal and project dirs exist.
-set -euo pipefail
+# Ensure internal pendrive is mounted at /media/usb_internal and project dirs exist.
+# Delegates dirty/RO recovery to kiosk_repair_internal_usb.sh.
+set -uo pipefail
 
 INTERNAL_USB_PATH="${INTERNAL_USB_PATH:-/media/usb_internal}"
 STORAGE_DIR="${STORAGE_DIR:-$INTERNAL_USB_PATH/storage}"
 REPORTS_DIR="${REPORTS_DIR:-$INTERNAL_USB_PATH/reports}"
 AUDIT_DB_DIR="${AUDIT_DB_DIR:-$INTERNAL_USB_PATH/db}"
+REPAIR_SCRIPT="${REPAIR_SCRIPT:-/opt/kiosk/scripts/kiosk_repair_internal_usb.sh}"
 
-_ensure_usb_writable() {
-  # After unclean power-off, vfat often remounts read-only (errors=remount-ro).
-  # Session clear / factory settings then fail and stale login state can stick.
-  if ! mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
-    return 1
+_run_root() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+  else
+    sudo -n "$@" 2>/dev/null || return 1
   fi
-  if touch "$INTERNAL_USB_PATH/.kiosk_write_test" 2>/dev/null; then
-    rm -f "$INTERNAL_USB_PATH/.kiosk_write_test" 2>/dev/null || true
-    return 0
-  fi
-  echo "kiosk_mount_internal_usb: storage is read-only — attempting remount,rw" >&2
-  mount -o remount,rw "$INTERNAL_USB_PATH" 2>/dev/null || true
-  if touch "$INTERNAL_USB_PATH/.kiosk_write_test" 2>/dev/null; then
-    rm -f "$INTERNAL_USB_PATH/.kiosk_write_test" 2>/dev/null || true
-    return 0
-  fi
-  echo "kiosk_mount_internal_usb: WARN still read-only after remount" >&2
-  return 1
 }
 
-if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
-  _ensure_usb_writable || true
+_writable() {
+  touch "$INTERNAL_USB_PATH/.kiosk_write_test" 2>/dev/null || return 1
+  rm -f "$INTERNAL_USB_PATH/.kiosk_write_test" 2>/dev/null || true
+  return 0
+}
+
+_ensure_dirs() {
   mkdir -p "$STORAGE_DIR" "$REPORTS_DIR" "$AUDIT_DB_DIR" 2>/dev/null || true
+}
+
+_repair() {
+  if [[ -x "$REPAIR_SCRIPT" ]]; then
+    bash "$REPAIR_SCRIPT" || true
+  fi
+}
+
+# Always attempt repair when missing or read-only.
+if ! mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
+  echo "kiosk_mount_internal_usb: not mounted — mounting/repairing" >&2
+  _run_root systemctl start media-usb_internal.mount 2>/dev/null || true
+  _run_root mount "$INTERNAL_USB_PATH" 2>/dev/null || true
+  # Wait for udev/fstab settle
+  for _i in 1 2 3 4 5 6 7 8; do
+    if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
+      break
+    fi
+    sleep 0.4
+  done
+fi
+
+if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
+  if ! _writable; then
+    echo "kiosk_mount_internal_usb: read-only — running repair" >&2
+    _repair
+  fi
+else
+  echo "kiosk_mount_internal_usb: still not mounted — running repair" >&2
+  _repair
+fi
+
+if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null && _writable; then
+  _ensure_dirs
   exit 0
 fi
 
-# fstab entry should mount this during local-fs.target; retry briefly if udev is still settling.
-if command -v mount >/dev/null 2>&1; then
-  mount "$INTERNAL_USB_PATH" 2>/dev/null || true
-fi
-
-for _i in $(seq 1 5); do
-  if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
-    _ensure_usb_writable || true
-    mkdir -p "$STORAGE_DIR" "$REPORTS_DIR" "$AUDIT_DB_DIR" 2>/dev/null || true
-    exit 0
-  fi
-  sleep 0.4
-done
-
-echo "kiosk_mount_internal_usb: WARN $INTERNAL_USB_PATH not mounted — using SD-card fallback until USB is available" >&2
+echo "kiosk_mount_internal_usb: WARN $INTERNAL_USB_PATH not writable — API may use degraded mode" >&2
+_ensure_dirs
 exit 0

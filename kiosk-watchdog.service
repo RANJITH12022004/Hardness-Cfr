@@ -1,7 +1,12 @@
 [Unit]
-Description=Tap Density kiosk health check (API + display)
+Description=Hardness CFR kiosk health check (storage + API + display)
 After=kiosk-bridge.service kiosk-display.service
 
 [Service]
 Type=oneshot
+Environment=INTERNAL_USB_PATH=/media/usb_internal
+Environment=STORAGE_DIR=/media/usb_internal/storage
+Environment=KIOSK_URL=http://127.0.0.1:5000/
+# Run as root so fsck/remount always works without relying on sudoers
 ExecStart=/bin/bash /opt/kiosk/scripts/kiosk_watchdog.sh
+Nice=10

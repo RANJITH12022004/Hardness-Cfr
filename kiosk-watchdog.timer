@@ -1,10 +1,10 @@
 [Unit]
-Description=Run Tap Density kiosk health check every 2 minutes
+Description=Run Hardness CFR kiosk health check every minute
 
 [Timer]
-OnBootSec=90
-OnUnitActiveSec=2min
-AccuracySec=30s
+OnBootSec=45
+OnUnitActiveSec=1min
+AccuracySec=15s
 Persistent=true
 
 [Install]

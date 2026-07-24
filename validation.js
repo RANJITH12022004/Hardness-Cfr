@@ -214,14 +214,14 @@ function selectOperation(operation) {
         if (operation === 'validate') {
             if (!_userCanRunValidation()) {
                 if (typeof showAppModal === 'function') showAppModal('You do not have permission to run validation.', 'Permission');
-                else alert('You do not have permission to run validation.');
+                else kioskAlert('You do not have permission to run validation.');
                 return;
             }
             navigateValCalHub('validate-type-select');
         } else if (operation === 'calibrate') {
             if (!_userCanRunCalibration()) {
                 if (typeof showAppModal === 'function') showAppModal('You do not have permission to run calibration.', 'Permission');
-                else alert('You do not have permission to run calibration.');
+                else kioskAlert('You do not have permission to run calibration.');
                 return;
             }
             softClearValCalRunningFlags();
@@ -302,12 +302,12 @@ var PROCEDURE_DISTANCE_ZERO = [
 function startValidationFromType() {
     if (!_userCanRunValidation()) {
         if (typeof showAppModal === 'function') showAppModal('You do not have permission to run validation.', 'Permission');
-        else alert('You do not have permission to run validation.');
+        else kioskAlert('You do not have permission to run validation.');
         return;
     }
     var selected = document.querySelector('input[name="val-type"]:checked');
     if (!selected) {
-        alert('Please select a validation type.');
+        kioskAlert('Please select a validation type.');
         return;
     }
     var type = selected.value;
@@ -329,7 +329,7 @@ function startValidationFromType() {
             var primaryBtn = document.getElementById('distance-validation-primary-btn');
             var statusText = document.getElementById('distance-validation-status-text');
             var measuredRow = document.getElementById('distance-validation-measured-row');
-            var passfailRow = document.getElementById('distance-validation-passfail-row');
+            var completeRow = document.getElementById('distance-validation-complete-row');
             if (gaugeInput) gaugeInput.value = '';
             if (primaryBtn) {
                 primaryBtn.textContent = 'Set Backoff';
@@ -338,7 +338,7 @@ function startValidationFromType() {
             }
             if (statusText) statusText.textContent = '';
             if (measuredRow) measuredRow.style.display = 'none';
-            if (passfailRow) passfailRow.style.display = 'none';
+            if (completeRow) completeRow.style.display = 'none';
         });
     }
 }
@@ -375,12 +375,12 @@ function startLoadValidation() {
                 connectLoadValidationSSE();
             } else {
                 loadValidationRunning = false;
-                alert('Failed to start load validation: ' + (data.error || 'Unknown error'));
+                kioskAlert('Failed to start load validation: ' + (data.error || 'Unknown error'));
             }
         })
         .catch(function (e) {
             loadValidationRunning = false;
-            alert('Failed to start load validation: ' + e.message);
+            kioskAlert('Failed to start load validation: ' + e.message);
         });
 }
 
@@ -404,7 +404,7 @@ function connectLoadValidationSSE() {
                 if (!isNaN(g)) {
                     var maxGrams = loadCellRangeN * 101.97;
                     if (g > maxGrams) {
-                        alert('Max load reached error');
+                        kioskAlert('Max load reached error');
                         loadValidationRunning = false;
                         if (loadValidationEventSource) {
                             try { loadValidationEventSource.close(); } catch (e) {}
@@ -451,7 +451,7 @@ function stopValidationAndBack() {
 
 function completeLoadValidation() {
     if (!loadValidationReadings.length) {
-        alert('No load readings to save.');
+        kioskAlert('No load readings to save.');
         return;
     }
     loadValidationRunning = false;
@@ -463,14 +463,9 @@ function completeLoadValidation() {
     var mean = loadValidationReadings.reduce(function (a, b) { return a + b; }, 0) / loadValidationReadings.length;
     var expectedWeightEl = document.getElementById('load-validation-expected-weight');
     var expectedWeight = expectedWeightEl && expectedWeightEl.value.trim() ? parseFloat(expectedWeightEl.value.trim()) : null;
-    var status = 'PASS';
-    if (expectedWeight != null && !isNaN(expectedWeight)) {
-        var tolerance = Math.abs(mean - expectedWeight) / expectedWeight * 100;
-        if (tolerance > 5) status = 'FAIL';
-    }
     var userInfo = getCurrentUserInfo();
     var reportData = {
-        name: 'Load Validation - ' + (status === 'PASS' ? 'Pass' : 'Fail'),
+        name: 'Load Validation',
         type: 'validation',
         validationSubtype: 'load',
         createdAt: new Date().toISOString(),
@@ -480,7 +475,6 @@ function completeLoadValidation() {
         max: max,
         mean: mean,
         expectedWeight: expectedWeight,
-        status: status,
         testData: {
             readings: loadValidationReadings,
             min: min,
@@ -508,7 +502,7 @@ function completeLoadValidation() {
                 distanceValidationRunning = false;
                 loadCalibrationRunning = false;
                 distanceCalibRunning = false;
-                alert('Load validation report saved.');
+                kioskAlert('Load validation report saved.');
                 if (window._userAbortedOperation) {
                     console.log('[DEBUG] User aborted operation, skipping navigation');
                     return;
@@ -528,7 +522,7 @@ function completeLoadValidation() {
                 } else {
                     console.warn('[DEBUG] No navigation function available');
                 }
-            });
+            }, reportId);
         })
         .catch(function (e) {
             console.error('Failed to save report:', e);
@@ -551,7 +545,7 @@ function startDistanceValidationPrimaryAction() {
 
     if (distanceValidationState === DIST_VAL_BACKOFF) {
         if (!gaugeInput || !gaugeInput.value.trim() || isNaN(gaugeValue) || gaugeValue <= 0) {
-            alert('Please enter a valid gauge block value (mm), greater than 0.');
+            kioskAlert('Please enter a valid gauge block value (mm), greater than 0.');
             return;
         }
         if (primaryBtn) primaryBtn.disabled = true;
@@ -582,7 +576,7 @@ function startDistanceValidationPrimaryAction() {
                 if (primaryBtn) { primaryBtn.disabled = false; primaryBtn.textContent = 'Set Backoff'; }
                 if (statusText) statusText.textContent = '';
                 if (e.message !== 'Cancelled') {
-                    alert('Distance validation failed: ' + (e.message || 'Unknown error'));
+                    kioskAlert('Distance validation failed: ' + (e.message || 'Unknown error'));
                 }
             });
         return;
@@ -614,10 +608,10 @@ function startDistanceValidationPrimaryAction() {
                 if (statusText) statusText.textContent = '';
                 var measuredValEl = document.getElementById('distance-validation-measured-value');
                 var measuredRow = document.getElementById('distance-validation-measured-row');
-                var passfailRow = document.getElementById('distance-validation-passfail-row');
                 if (measuredValEl) measuredValEl.textContent = measured.toFixed(2);
                 if (measuredRow) measuredRow.style.display = 'flex';
-                if (passfailRow) passfailRow.style.display = 'flex';
+                var completeRow = document.getElementById('distance-validation-complete-row');
+                if (completeRow) completeRow.style.display = 'flex';
                 if (primaryBtn) primaryBtn.style.display = 'none';
             })
             .catch(function (e) {
@@ -626,7 +620,7 @@ function startDistanceValidationPrimaryAction() {
                 if (primaryBtn) { primaryBtn.disabled = false; primaryBtn.textContent = 'Validate'; }
                 if (statusText) statusText.textContent = 'Place gauge block and press Validate';
                 if (e.message !== 'Cancelled') {
-                    alert('Distance validation failed: ' + (e.message || 'Unknown error'));
+                    kioskAlert('Distance validation failed: ' + (e.message || 'Unknown error'));
                 }
             });
     }
@@ -637,16 +631,24 @@ function startDistanceValidationTest() {
 }
 
 function completeDistanceValidationPass() {
-    completeDistanceValidationWithStatus('PASS');
+    completeDistanceValidationSave();
 }
 
 function completeDistanceValidationFail() {
-    completeDistanceValidationWithStatus('FAIL');
+    completeDistanceValidationSave();
+}
+
+function completeDistanceValidation() {
+    completeDistanceValidationSave();
 }
 
 function completeDistanceValidationWithStatus(status) {
+    completeDistanceValidationSave();
+}
+
+function completeDistanceValidationSave() {
     if (!distanceValidationResultData) {
-        alert('No distance result to save.');
+        kioskAlert('No distance result to save.');
         return;
     }
     var gaugeVal = distanceValidationResultData.gauge;
@@ -654,7 +656,7 @@ function completeDistanceValidationWithStatus(status) {
     var diff = measuredVal - gaugeVal;
     var userInfo = getCurrentUserInfo();
     var reportData = {
-        name: 'Distance Validation - ' + status,
+        name: 'Distance Validation',
         type: 'validation',
         validationSubtype: 'distance',
         createdAt: new Date().toISOString(),
@@ -662,7 +664,6 @@ function completeDistanceValidationWithStatus(status) {
         distance: measuredVal,
         expectedGaugeBlock: gaugeVal,
         difference: diff,
-        status: status,
         testData: {
             distance: measuredVal,
             expectedGaugeBlock: gaugeVal,
@@ -682,39 +683,8 @@ function completeDistanceValidationWithStatus(status) {
                 ? resolveCreatedReportId(data)
                 : data.id;
             distanceValidationRunning = false;
-            if (status === 'PASS') {
-                showCalibrationDueModal(function () {
-                    console.log('[DEBUG] Distance validation PASS callback executing, reportId:', reportId);
-                    // Clear all flags before navigation
-                    loadValidationRunning = false;
-                    distanceValidationRunning = false;
-                    loadCalibrationRunning = false;
-                    distanceCalibRunning = false;
-                    if (window._userAbortedOperation) {
-                        console.log('[DEBUG] User aborted operation, skipping navigation');
-                        return;
-                    }
-                    // Navigate directly to generated report preview after date selection
-                    if (reportId && typeof openReportPreview === 'function') {
-                        console.log('[DEBUG] Opening report preview for reportId:', reportId);
-                        openReportPreview(reportId, { setGate: true }).catch(function(e) {
-                            console.error('[DEBUG] Failed to open report preview:', e);
-                            if (typeof goToPage === 'function') {
-                                console.log('[DEBUG] Fallback: navigating to reports page');
-                                goToPage('reports');
-                            }
-                        });
-                    } else if (typeof goToPage === 'function') {
-                        console.log('[DEBUG] No reportId or openReportPreview, navigating to reports page');
-                        goToPage('reports');
-                    } else {
-                        console.warn('[DEBUG] No navigation function available');
-                    }
-                });
-            } else {
-                // Navigate to report preview for FAIL (same as PASS)
-                console.log('[DEBUG] Distance validation FAIL callback executing, reportId:', reportId);
-                // Clear all flags before navigation
+            showCalibrationDueModal(function () {
+                console.log('[DEBUG] Distance validation callback executing, reportId:', reportId);
                 loadValidationRunning = false;
                 distanceValidationRunning = false;
                 loadCalibrationRunning = false;
@@ -738,7 +708,7 @@ function completeDistanceValidationWithStatus(status) {
                 } else {
                     console.warn('[DEBUG] No navigation function available');
                 }
-            }
+            }, reportId);
         })
         .catch(function (e) {
             console.error('Failed to save report:', e);
@@ -751,7 +721,7 @@ function startCalibrationFromType() {
     var run = function () {
         if (!_userCanRunCalibration()) {
             if (typeof showAppModal === 'function') showAppModal('You do not have permission to run calibration.', 'Permission');
-            else alert('You do not have permission to run calibration.');
+            else kioskAlert('You do not have permission to run calibration.');
             return;
         }
         if (!isValidationOrCalibrationHardwareActive()) {
@@ -764,7 +734,7 @@ function startCalibrationFromType() {
         }
         var selected = document.querySelector('input[name="cal-type"]:checked');
         if (!selected) {
-            alert('Please select a calibration type.');
+            kioskAlert('Please select a calibration type.');
             return;
         }
         var type = selected.value;
@@ -853,7 +823,7 @@ function startLoadCalibration() {
                         } else if (typeof goToPage === 'function') {
                             goToPage('reports');
                         }
-                    });
+                    }, reportId);
                 })
                 .catch(function (e) {
                     showCalibrationDueModal(function () {
@@ -861,13 +831,13 @@ function startLoadCalibration() {
                         distanceValidationRunning = false;
                         loadCalibrationRunning = false;
                         distanceCalibRunning = false;
-                        alert('Weight calibration completed successfully. Report save failed: ' + e.message);
+                        kioskAlert('Weight calibration completed successfully. Report save failed: ' + e.message);
                         if (typeof goToPage === 'function') goToPage('reports');
                     });
                 });
         } else if (response.indexOf('C,LOAD,ERR') !== -1 || response.indexOf('ERR') !== -1) {
             if (statusEl) statusEl.textContent = 'Error';
-            alert('Weight calibration failed.');
+            kioskAlert('Weight calibration failed.');
         } else {
             if (statusEl) statusEl.textContent = 'Ready';
         }
@@ -875,7 +845,7 @@ function startLoadCalibration() {
         loadCalibrationRunning = false;
         if (btn) btn.disabled = false;
         if (statusEl) statusEl.textContent = 'Error';
-        alert('Calibration failed: ' + (e.message || 'Unknown error'));
+        kioskAlert('Calibration failed: ' + (e.message || 'Unknown error'));
     });
 }
 
@@ -909,7 +879,7 @@ function startDistanceZeroCalibration() {
                 if (statusEl) statusEl.textContent = 'Ready';
                 if (e.message !== 'Cancelled') {
                     if (typeof showModal === 'function') showModal('Calibration Failed', e.message || 'Unknown error');
-                    else alert('Calibration failed: ' + (e.message || 'Unknown error'));
+                    else kioskAlert('Calibration failed: ' + (e.message || 'Unknown error'));
                 }
             });
         return;
@@ -975,7 +945,7 @@ function startDistanceZeroCalibration() {
                 } else if (typeof goToPage === 'function') {
                     goToPage('reports');
                 }
-            });
+            }, reportId);
         }).catch(function (e) {
             distanceCalibRunning = false;
             distanceCalibState = CALIB_READY;
@@ -983,7 +953,7 @@ function startDistanceZeroCalibration() {
             if (statusEl) statusEl.textContent = 'Place 10 mm gauge block and press Calibrate';
             if (e.message !== 'Cancelled') {
                 if (typeof showModal === 'function') showModal('Calibration Failed', e.message || 'Unknown error');
-                else alert('Calibration failed: ' + (e.message || 'Unknown error'));
+                else kioskAlert('Calibration failed: ' + (e.message || 'Unknown error'));
             }
         });
     }
@@ -991,9 +961,11 @@ function startDistanceZeroCalibration() {
 
 // ===== CALIBRATION DUE DATE MODAL =====
 var _calibrationDueCallback = null;
+var _calibrationDueReportId = null;
 
-function showCalibrationDueModal(callback) {
+function showCalibrationDueModal(callback, reportId) {
     _calibrationDueCallback = callback || null;
+    _calibrationDueReportId = (reportId != null && reportId !== '') ? reportId : null;
     var modal = document.getElementById('calibration-due-modal');
     if (modal) modal.style.display = 'flex';
 }
@@ -1002,6 +974,7 @@ function closeCalibrationDueModal() {
     var modal = document.getElementById('calibration-due-modal');
     if (modal) modal.style.display = 'none';
     _calibrationDueCallback = null;
+    _calibrationDueReportId = null;
 }
 
 function confirmCalibrationDue(months) {
@@ -1012,40 +985,54 @@ function confirmCalibrationDue(months) {
     var nextDateStr = nextDate.toISOString().split('T')[0];
     var lastFormatted = formatDateForDisplay(lastDate);
     var nextFormatted = formatDateForDisplay(nextDateStr);
+    var reportId = _calibrationDueReportId;
+    var cb = _calibrationDueCallback;
 
-    fetch('/api/data/factory-settings').then(function (r) { return r.json(); }).then(function (res) {
-        var settings = res.settings || {};
-        settings.lastValidationDate = lastFormatted;
-        settings.nextValidationDate = nextFormatted;
-        return fetch('/api/data/factory-settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(settings)
-        });
-    }).then(function () {
-        console.log('[DEBUG] Factory settings saved, executing callback');
-        var cb = _calibrationDueCallback;
-        console.log('[DEBUG] Callback type:', typeof cb);
+    function finishDueModal() {
+        console.log('[DEBUG] Pending due dates stashed, executing callback');
         closeCalibrationDueModal();
-
         if (typeof window !== 'undefined') {
             window._userAbortedOperation = false;
         }
-
         if (typeof cb === 'function') {
-            console.log('[DEBUG] Executing callback');
-            try {
-                cb();
-            } catch (e) {
+            try { cb(); } catch (e) {
                 console.error('[DEBUG] Callback execution error:', e);
             }
-        } else {
-            console.warn('[DEBUG] No callback to execute');
         }
-    }).catch(function (e) {
-        console.error('[DEBUG] Failed to save calibration due date:', e);
-        alert('Failed to save calibration due date: ' + (e.message || 'Unknown error'));
-    });
+    }
+
+    // Stash on report only — dates persist to factory settings on approval Pass.
+    if (reportId == null) {
+        finishDueModal();
+        return;
+    }
+    var headers = { 'Content-Type': 'application/json' };
+    try {
+        var u = (typeof window !== 'undefined' && window.currentUser) ? window.currentUser : null;
+        if (u) {
+            if (u.role) headers['X-User-Role'] = u.role;
+            if (u.name) headers['X-User-Name'] = u.name;
+            if (u.username) headers['X-User-Username'] = u.username;
+        }
+    } catch (eHdr) { /* ignore */ }
+    fetch('/api/data/reports/' + reportId + '/pending-due', {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({
+            months: months,
+            lastValidationDate: lastFormatted,
+            nextValidationDate: nextFormatted
+        })
+    }).then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+            throw new Error((res.data && res.data.error) || 'Failed to stash due date');
+        }
+        finishDueModal();
+      }).catch(function (e) {
+        console.error('[DEBUG] Failed to stash calibration due date:', e);
+        kioskAlert('Failed to save next validation interval: ' + (e.message || 'Unknown error'));
+      });
 }
 
 function formatDateForDisplay(isoDate) {
@@ -1088,5 +1075,5 @@ function closeCalibrationStep2() {
 
 function finishCalibration() {
     closeCalibrationStep2();
-    alert('Calibration Process Completed Successfully!');
+    kioskAlert('Calibration Process Completed Successfully!');
 }
