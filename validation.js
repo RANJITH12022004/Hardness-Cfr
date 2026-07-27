@@ -463,7 +463,7 @@ function completeLoadValidation() {
     stopLoadValidationSSE();
     fetch('/api/hardware/validation/load/stop', { method: 'POST' }).catch(function () {});
 
-    var mean = loadValidationReadings.reduce(function (a, b) { return a + b; }, 0) / loadValidationReadings.length;
+    var measuredWeight = loadValidationReadings[loadValidationReadings.length - 1];
     var expectedWeightEl = document.getElementById('load-validation-expected-weight');
     var expectedWeight = expectedWeightEl && expectedWeightEl.value.trim() ? parseFloat(expectedWeightEl.value.trim()) : null;
     var userInfo = getCurrentUserInfo();
@@ -474,12 +474,12 @@ function completeLoadValidation() {
         createdAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),
         readings: loadValidationReadings,
-        mean: mean,
         expectedWeight: expectedWeight,
+        measuredWeight: measuredWeight,
         testData: {
             readings: loadValidationReadings,
-            mean: mean,
             expectedWeight: expectedWeight,
+            measuredWeight: measuredWeight,
             operatorName: userInfo.operatorName,
             employeeId: userInfo.employeeId
         }

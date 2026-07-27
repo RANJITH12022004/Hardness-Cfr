@@ -784,25 +784,37 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
         preview["validationSubtype"] = report.get("validationSubtype")
         for key in (
             "expectedWeight",
-            "min",
-            "max",
-            "mean",
+            "measuredWeight",
             "expectedGaugeBlock",
             "distance",
             "difference",
         ):
             if report.get(key) is not None:
                 preview[key] = report.get(key)
+        # Legacy load reports: use last reading as measured weight (no min/max/mean).
+        if preview.get("measuredWeight") is None:
+            td_local = td if isinstance(td, dict) else {}
+            measured = td_local.get("measuredWeight")
+            if measured is None:
+                readings = report.get("readings") or td_local.get("readings") or []
+                if isinstance(readings, list) and readings:
+                    measured = readings[-1]
+            if measured is not None:
+                preview["measuredWeight"] = measured
+        if preview.get("expectedWeight") is None and isinstance(td, dict) and td.get("expectedWeight") is not None:
+            preview["expectedWeight"] = td.get("expectedWeight")
         preview["status"] = resolve_validation_result_status(report)
     elif report.get("type") == "calibration":
         preview["calibrationSubtype"] = report.get("calibrationSubtype")
         if report.get("status") is not None:
             preview["status"] = report.get("status")
-    # Same monospace A4 text used by A4 print and PDF export (screen preview must match).
+    # Screen preview: same A4 body as print/export, but without Printed/Export footer.
     try:
         import print_service
 
-        preview["a4Text"] = print_service.format_for_a4_printer(report).rstrip()
+        preview["a4Text"] = print_service.format_for_a4_printer(
+            report, include_printed_timestamp=False
+        ).rstrip()
     except Exception:
         preview["a4Text"] = ""
     return preview
@@ -890,13 +902,19 @@ def _validation_details_table_html(preview: Dict[str, Any]) -> str:
         subtype = preview.get("validationSubtype") or (td.get("validationSubtype") if isinstance(td, dict) else None) or "load"
         status = resolve_validation_result_status(preview)
         if subtype == "load":
+            measured = preview.get("measuredWeight")
+            if measured is None and isinstance(td, dict):
+                measured = td.get("measuredWeight")
+            if isinstance(measured, float):
+                measured_disp = "{:.2f}".format(measured)
+            else:
+                measured_disp = measured if measured is not None else "--"
             rows.append(
-                "<tr><th>Expected Weight (g)</th><td>{}</td><th>Mean (g)</th><td>{}</td></tr>".format(
+                "<tr><th>Expected Weight (g)</th><td>{}</td><th>Actual Weight (g)</th><td>{}</td></tr>".format(
                     _html_esc(preview.get("expectedWeight", "--")),
-                    _html_esc(preview.get("mean", "--")),
+                    _html_esc(measured_disp),
                 )
             )
-            rows.append('<tr><th>Status</th><td colspan="3">{}</td></tr>'.format(_html_esc(status)))
         else:
             rows.append(
                 "<tr><th>Gauge Value (mm)</th><td>{}</td><th>Measured (mm)</th><td>{}</td></tr>".format(

@@ -812,10 +812,20 @@ def _format_validation_calibration_text(report_data: Dict[str, Any], width: int 
     if report_type == "validation":
         subtype = report_data.get("validationSubtype", "load")
         if subtype == "load":
+            measured = report_data.get("measuredWeight")
+            if measured is None:
+                measured = test_data.get("measuredWeight")
+            if measured is None:
+                readings = report_data.get("readings") or test_data.get("readings") or []
+                if isinstance(readings, list) and readings:
+                    measured = readings[-1]
             lines.append("Load Validation Details:")
-            lines.append(f"  Expected Weight: {report_data.get('expectedWeight', '--')} g")
-            lines.append(f"  Mean: {_non_negative_display(report_data.get('mean'), 2)} g")
-            lines.append(f"  Validation Status: {report_service.resolve_validation_result_status(report_data)}")
+            expected = report_data.get("expectedWeight", test_data.get("expectedWeight"))
+            if expected is None or expected == "":
+                expected = "--"
+            measured_disp = _non_negative_display(measured, 2) if measured is not None and measured != "" else "--"
+            lines.append(f"  Expected Weight: {expected} g")
+            lines.append(f"  Actual Weight: {measured_disp} g")
         else:
             lines.append("Distance Validation Details:")
             lines.append(f"  Gauge Value: {_non_negative_display(report_data.get('expectedGaugeBlock'), 2)} mm")

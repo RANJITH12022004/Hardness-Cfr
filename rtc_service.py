@@ -64,10 +64,23 @@ def _run_privileged(cmd: List[str], timeout_sec: int = 8) -> Tuple[bool, str]:
     return False, err
 
 
+def ensure_ist_timezone() -> bool:
+    """Force Asia/Kolkata (IST). Hardness kiosks ship for India; never leave CST/UTC."""
+    if os.name == "nt" or sys.platform == "win32":
+        return True
+    ok, err = _run_privileged(
+        ["timedatectl", "set-timezone", "Asia/Kolkata"], timeout_sec=10
+    )
+    if not ok and _logger:
+        _logger.warning("timedatectl set-timezone Asia/Kolkata failed: %s", err)
+    return ok
+
+
 def disable_network_time_sync() -> bool:
     """Turn off NTP/systemd-timesyncd so the DS1307 is not overwritten by network time."""
     if os.name == "nt" or sys.platform == "win32":
         return True
+    ensure_ist_timezone()
     ok, err = _run_privileged(["timedatectl", "set-ntp", "false"], timeout_sec=10)
     if not ok and _logger:
         _logger.warning("timedatectl set-ntp false failed: %s", err)
@@ -243,9 +256,13 @@ def _wall_times_match(wanted: datetime, got: Optional[datetime], slack_sec: int 
 
 
 def apply_user_wall_time(dt: datetime) -> Tuple[bool, str]:
-    """Apply user-entered local date/time: disable NTP, set system, write DS1307, verify."""
+    """Apply user-entered local IST date/time: disable NTP, set system, write DS1307, verify."""
     if dt is None:
         return False, "datetime required"
+    # Strip any tzinfo — caller sends naive local wall time (IST).
+    if getattr(dt, "tzinfo", None) is not None:
+        dt = dt.replace(tzinfo=None)
+    ensure_ist_timezone()
     disable_network_time_sync()
     date_cmd_str = dt.strftime("%Y-%m-%d %H:%M:%S")
     ok_td, err_td = _run_privileged(
@@ -306,6 +323,7 @@ def ensure_rtc_is_clock_authority() -> None:
     if os.name == "nt" or sys.platform == "win32":
         return
     try:
+        ensure_ist_timezone()
         disable_network_time_sync()
         net_dt = _fetch_network_wall_datetime()
         rtc_dt = read_rtc_wall_datetime()

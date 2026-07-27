@@ -1643,15 +1643,70 @@ function approveReportWithVerifier(reportId, passFail, remarks, verifyMethod) {
     }
 
     if (role === 'factory') {
-        return postReportApprove({}).then(function (data) { return data && data.ok; });
+        return postReportApprove({});
     }
 
     return verifyReportApproverInline(verifyMethod).then(function (token) {
         if (!token) return null;
-        return postReportApprove({ 'X-Approval-Verify-Token': token }).then(function (data) {
-            return data && data.ok;
-        });
+        return postReportApprove({ 'X-Approval-Verify-Token': token });
     });
+}
+
+/** After Pass/Fail approval: refresh preview in place (no loading overlay / navigation). */
+function applyApprovedReportPreview(reportId, approveData) {
+    var id = reportId;
+    var preview = approveData && approveData.preview;
+    window.currentReportId = id;
+    if (typeof currentReportId !== 'undefined') currentReportId = id;
+    if (typeof unlockNavigation === 'function') unlockNavigation();
+    if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+
+    function finishUi(p) {
+        window._lastReportPreview = p || window._lastReportPreview;
+        if (typeof applyReportPreviewLockUi === 'function') applyReportPreviewLockUi(p);
+        if (typeof updateReportApprovePanelForPreview === 'function') updateReportApprovePanelForPreview(p);
+        if (typeof updateReportPreviewPrintExportButtons === 'function') updateReportPreviewPrintExportButtons(p);
+        // Ensure report-preview page stays visible (avoid dark empty main area).
+        var previewPage = document.getElementById('page-report-preview');
+        var active = document.querySelector('.page.active');
+        if (previewPage && (!active || active.id !== 'page-report-preview')) {
+            document.querySelectorAll('.page').forEach(function (pg) { pg.classList.remove('active'); });
+            previewPage.classList.add('active');
+            var app = document.querySelector('.app-container');
+            if (app) app.style.display = '';
+        }
+        showAppModal('Report approved.', 'Report');
+        setTimeout(function () {
+            if (typeof _saveReportPdfSilent === 'function') _saveReportPdfSilent(id);
+            if (typeof scrollReportPreviewActionsIntoView === 'function') {
+                scrollReportPreviewActionsIntoView();
+            }
+        }, 300);
+    }
+
+    if (preview && typeof populateReportPreview === 'function') {
+        return Promise.resolve(populateReportPreview(preview)).then(function () {
+            finishUi(preview);
+            return true;
+        }).catch(function () {
+            if (typeof openReportPreview === 'function') {
+                return openReportPreview(id, { bypassRbac: true }).then(function () {
+                    showAppModal('Report approved.', 'Report');
+                    return true;
+                });
+            }
+            finishUi(preview);
+            return true;
+        });
+    }
+    if (typeof openReportPreview === 'function') {
+        return openReportPreview(id, { bypassRbac: true }).then(function () {
+            showAppModal('Report approved.', 'Report');
+            return true;
+        });
+    }
+    finishUi(null);
+    return Promise.resolve(true);
 }
 
 function submitReportApprove() {
@@ -1666,22 +1721,12 @@ function submitReportApprove() {
     var ta = document.getElementById('report-approve-remarks-input');
     var remarks = ta ? ta.value.trim() : '';
     clearReportApproveVerifyError();
-    approveReportWithVerifier(id, pf, remarks, 'credentials').then(function (ok) {
-        if (ok === true) {
-            resetReportApproveForm();
-            window._reportApproveFormReportId = null;
-            clearReportApprovalGate();
-            showAppModal('Report approved.', 'Report');
-            if (typeof openReportPreview === 'function') {
-                openReportPreview(id);
-            }
-            setTimeout(function () {
-                if (typeof _saveReportPdfSilent === 'function') _saveReportPdfSilent(id);
-                if (typeof scrollReportPreviewActionsIntoView === 'function') {
-                    scrollReportPreviewActionsIntoView();
-                }
-            }, 600);
-        }
+    approveReportWithVerifier(id, pf, remarks, 'credentials').then(function (data) {
+        if (!(data && data.ok)) return;
+        resetReportApproveForm();
+        window._reportApproveFormReportId = null;
+        clearReportApprovalGate();
+        return applyApprovedReportPreview(id, data);
     }).catch(function (err) {
         setReportApproveVerifyError('Approval failed: ' + (err && err.message ? err.message : 'Error'));
     });
@@ -1700,22 +1745,12 @@ function submitReportApproveBiometric() {
     var remarks = ta ? ta.value.trim() : '';
     clearReportApproveVerifyError();
     setReportApproveBiometricRetryVisible(false);
-    approveReportWithVerifier(id, pf, remarks, 'biometric').then(function (ok) {
-        if (ok === true) {
-            resetReportApproveForm();
-            window._reportApproveFormReportId = null;
-            clearReportApprovalGate();
-            showAppModal('Report approved.', 'Report');
-            if (typeof openReportPreview === 'function') {
-                openReportPreview(id);
-            }
-            setTimeout(function () {
-                if (typeof _saveReportPdfSilent === 'function') _saveReportPdfSilent(id);
-                if (typeof scrollReportPreviewActionsIntoView === 'function') {
-                    scrollReportPreviewActionsIntoView();
-                }
-            }, 600);
-        }
+    approveReportWithVerifier(id, pf, remarks, 'biometric').then(function (data) {
+        if (!(data && data.ok)) return;
+        resetReportApproveForm();
+        window._reportApproveFormReportId = null;
+        clearReportApprovalGate();
+        return applyApprovedReportPreview(id, data);
     }).catch(function (err) {
         setReportApproveVerifyError('Approval failed: ' + (err && err.message ? err.message : 'Error'));
     });

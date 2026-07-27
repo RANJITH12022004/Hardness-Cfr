@@ -2628,8 +2628,18 @@ async function populateReportPreviewDom(stored) {
                 var subtype = stored.validationSubtype || 'load';
                 var valStatus = stored.approvalPassFail || stored.status || 'Pending';
                 if (subtype === 'load') {
-                    rows.push('<tr><th>Expected Weight (g)</th><td>' + (stored.expectedWeight != null ? stored.expectedWeight : '--') + '</td><th>Mean (g)</th><td>' + (stored.mean != null ? stored.mean.toFixed(2) : '--') + '</td></tr>');
-                    rows.push('<tr><th>Status</th><td colspan="3">' + valStatus + '</td></tr>');
+                    var measuredWt = stored.measuredWeight != null ? stored.measuredWeight
+                        : (td.measuredWeight != null ? td.measuredWeight : null);
+                    if (measuredWt == null) {
+                        var rd = stored.readings || td.readings || [];
+                        if (rd.length) measuredWt = rd[rd.length - 1];
+                    }
+                    var measuredDisp = (typeof measuredWt === 'number' && !isNaN(measuredWt))
+                        ? measuredWt.toFixed(2)
+                        : (measuredWt != null ? measuredWt : '--');
+                    var expectedWt = stored.expectedWeight != null ? stored.expectedWeight
+                        : (td.expectedWeight != null ? td.expectedWeight : '--');
+                    rows.push('<tr><th>Expected Weight (g)</th><td>' + expectedWt + '</td><th>Actual Weight (g)</th><td>' + measuredDisp + '</td></tr>');
                 } else {
                     rows.push('<tr><th>Gauge Value (mm)</th><td>' + (stored.expectedGaugeBlock != null ? (typeof stored.expectedGaugeBlock === 'number' ? stored.expectedGaugeBlock.toFixed(2) : stored.expectedGaugeBlock) : '--') + '</td><th>Measured Value (mm)</th><td>' + (stored.distance != null ? (typeof stored.distance === 'number' ? stored.distance.toFixed(2) : stored.distance) : '--') + '</td></tr>');
                     rows.push('<tr><th>Difference (mm)</th><td>' + (stored.difference != null ? (typeof stored.difference === 'number' ? stored.difference.toFixed(2) : stored.difference) : '--') + '</td><th>Status</th><td>' + valStatus + '</td></tr>');
@@ -3034,7 +3044,14 @@ function renderReportA4TextPreview(preview) {
     var container = document.getElementById('report-content');
     var a4Text = preview && preview.a4Text;
     if (pre && a4Text && String(a4Text).trim()) {
-        pre.textContent = String(a4Text);
+        // Preview must not show Printed/Export Date/Time (added only on print or USB export).
+        var previewText = String(a4Text)
+            .replace(/\n*Printed Date:.*$/gm, '')
+            .replace(/\n*Printed Time:.*$/gm, '')
+            .replace(/\n*Export Date:.*$/gm, '')
+            .replace(/\n*Export Time:.*$/gm, '')
+            .replace(/\n+$/g, '');
+        pre.textContent = previewText;
         if (textView) textView.style.display = 'block';
         if (htmlView) htmlView.style.display = 'none';
         if (container) container.classList.add('report-a4-text-mode');
@@ -3131,6 +3148,7 @@ function openReportPreview(reportId, options) {
         }
     }
     if (!canOpen) {
+        if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
         if (typeof denyPermission === 'function') denyPermission('view report preview');
         else if (typeof showAppModal === 'function') showAppModal('You do not have permission to open report preview.', 'Permission');
         else kioskAlert('You do not have permission to open report preview.');
@@ -3215,6 +3233,7 @@ function openReportPreview(reportId, options) {
             if (typeof goToPage === 'function') goToPage('reports');
         }
     }).finally(function () {
+        // Only the latest open owns the overlay; always clear when we are still latest.
         if (myGen === _openReportPreviewGen) {
             hideReportPreviewLoadingOverlayAfterRender();
         }
@@ -6467,61 +6486,24 @@ async function applyDateTime() {
     hours = Math.max(0, Math.min(23, hours));
     minutes = Math.max(0, Math.min(59, minutes));
 
-    // Send literal date and time as entered (no UTC offset); system time uses this directly
+    // Literal IST wall time as entered — no CST/+6 offset (that TapDensity hack
+    // overwrote the DS1307 after a correct set and made the clock jump).
     const pad = function (n) { return String(n).padStart(2, '0'); };
     const dtStr = year + '-' + pad(month) + '-' + pad(day) + 'T' + pad(hours) + ':' + pad(minutes) + ':00';
-
-    // Create adjusted datetime for RTC (+6 hours to compensate for CST timezone offset after restart)
-    // This ensures that after restart, when Pi reads RTC and displays in CST, it shows the correct time
-    const userDate = new Date(dtStr);
-    userDate.setHours(userDate.getHours() + 6);
-    const rtcDtStr = userDate.getFullYear() + '-' + 
-                     pad(userDate.getMonth() + 1) + '-' + 
-                     pad(userDate.getDate()) + 'T' + 
-                     pad(userDate.getHours()) + ':' + 
-                     pad(userDate.getMinutes()) + ':00';
 
     const roleHeader = (typeof window.currentUser !== 'undefined' && window.currentUser && window.currentUser.role)
         ? window.currentUser.role : ((typeof currentUser !== 'undefined' && currentUser && currentUser.role) ? currentUser.role : '');
     const headers = roleHeader ? { 'X-User-Role': roleHeader } : {};
 
     try {
-        let success = false;
-        let setDatetimeOk = false;
-        try {
-            const r = await fetch('/api/set_datetime', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...headers },
-                body: JSON.stringify({ datetime: dtStr })
-            });
-            if (r.ok) {
-                setDatetimeOk = true;
-                success = true;
-            } else {
-                const err = await r.json().catch(() => ({}));
-                throw new Error(err.error || 'Failed to set datetime');
-            }
-        } catch (e1) {
-            setDatetimeOk = false;
-        }
-        // Always sync to hardware RTC (DS1307 on SDA/SCL) so it updates on the Pi
-        // Use adjusted datetime (+6 hours) for RTC to compensate for CST timezone offset
-        let rtcOk = false;
-        if (setDatetimeOk || !success) {
-            try {
-                const r2 = await fetch('/api/rtc/date', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', ...headers },
-                    body: JSON.stringify({ datetime: rtcDtStr })
-                });
-                const data = await r2.json().catch(() => ({}));
-                if (r2.ok && data.success) {
-                    success = true;
-                    rtcOk = true;
-                } else if (!setDatetimeOk) throw new Error(data.error || 'Failed to set RTC');
-            } catch (e2) {
-                if (!success) throw new Error(e2.message || 'Failed to update date and time');
-            }
+        const r = await fetch('/api/set_datetime', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body: JSON.stringify({ datetime: dtStr })
+        });
+        if (!r.ok) {
+            const err = await r.json().catch(function () { return {}; });
+            throw new Error(err.error || 'Failed to set datetime');
         }
         updateDateTime();
         showModal('Success', 'Applied successfully.', function () {
@@ -7353,7 +7335,43 @@ function endKioskExportGuard() {
     markAutoLogoutActivity();
 }
 
+function isOnTestValidationOrCalibrationPage() {
+    try {
+        var active = document.querySelector('.page.active');
+        var id = active && active.id ? String(active.id) : '';
+        if (!id) return false;
+        // Test run / setup screens
+        if (
+            id === 'page-test-run' ||
+            id === 'page-quick-test' ||
+            id === 'page-shape-selection'
+        ) {
+            return true;
+        }
+        // Validation & calibration screens (including hubs / result)
+        if (
+            id === 'page-validate' ||
+            id === 'page-validate-type-select' ||
+            id === 'page-calibration-type-select' ||
+            id === 'page-load-validation' ||
+            id === 'page-distance-validation' ||
+            id === 'page-distance-validation-result' ||
+            id === 'page-load-calibration' ||
+            id === 'page-distance-zero-calibration'
+        ) {
+            return true;
+        }
+        // Pending approval after a run — already gated, but keep session while locked on preview
+        if (id === 'page-report-preview' && typeof hasActiveReportApprovalGate === 'function' && hasActiveReportApprovalGate()) {
+            return true;
+        }
+    } catch (e) {}
+    return false;
+}
+
 function isAutoLogoutRunBlocked() {
+    // Never auto-logout on test / validation / calibration pages (even if waiting idle).
+    if (isOnTestValidationOrCalibrationPage()) return true;
     // Hardness: use isOperationRunning (testRunActive + val/cal flags).
     try {
         if (typeof isOperationRunning === 'function' && isOperationRunning()) return true;

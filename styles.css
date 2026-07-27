@@ -7602,14 +7602,19 @@ select.input-field {
     min-width: 100px;
     cursor: pointer;
     margin: 0;
+    /* Contain clipped radio so focus does not scroll the preview off-screen (black blank). */
+    position: relative;
 }
 
 .report-approve-pf-input {
     position: absolute;
+    left: 0;
+    top: 0;
     width: 1px;
     height: 1px;
     padding: 0;
-    margin: -1px;
+    margin: 0;
+    opacity: 0;
     overflow: hidden;
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
@@ -7666,14 +7671,18 @@ select.input-field {
     min-width: 100px;
     cursor: pointer;
     margin: 0;
+    position: relative;
 }
 
 .test-run-completion-pf-input {
     position: absolute;
+    left: 0;
+    top: 0;
     width: 1px;
     height: 1px;
     padding: 0;
-    margin: -1px;
+    margin: 0;
+    opacity: 0;
     overflow: hidden;
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;

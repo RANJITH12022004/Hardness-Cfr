@@ -5332,7 +5332,15 @@ def set_rtc_date_route():
         return jsonify({"success": False, "error": "datetime required"}), 400
     try:
         from datetime import datetime
-        dt_obj = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        # Naive local IST wall time only (strip Z/+offset so UTC is never treated as local).
+        clean = dt_str.strip().replace("Z", "")
+        if "+" in clean:
+            clean = clean.split("+", 1)[0]
+        if clean.count("-") > 2:
+            clean = clean.rsplit("-", 1)[0]
+        dt_obj = datetime.fromisoformat(clean)
+        if getattr(dt_obj, "tzinfo", None) is not None:
+            dt_obj = dt_obj.replace(tzinfo=None)
     except Exception:
         return jsonify({"success": False, "error": "invalid datetime"}), 400
     result = rtc_service.set_rtc_date(dt_obj)
