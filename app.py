@@ -293,6 +293,13 @@ def _audit_event(
     )
 
 
+def _disabled_login_audit_details(member, username):
+    member = member or {}
+    attempted_username = str(member.get("username") or username or "").strip() or "--"
+    attempted_name = str(member.get("name") or "").strip() or "--"
+    return "Disabled user {} ({}) tried to log in".format(attempted_username, attempted_name)
+
+
 
 
 POWER_INTERRUPTION_REMARKS = "power interruption"
@@ -2364,7 +2371,7 @@ def save_factory_settings():
         before = data_service.get_factory_settings() or {}
         data_service.save_factory_settings(settings)
         saved = data_service.get_factory_settings() or {}
-        date_keys = {"lastValidationDate", "nextValidationDate"}
+        date_keys = {"lastValidationDate", "nextValidationDate", "dueIntervalMonths", "dueKind"}
         changed = []
         for key in set(list(before.keys()) + list(saved.keys())):
             if before.get(key) != saved.get(key):
@@ -2398,19 +2405,29 @@ def save_validation_due_dates():
         body = request.get_json(force=True, silent=True) or {}
         last = str(body.get("lastValidationDate") or "").strip()
         nxt = str(body.get("nextValidationDate") or "").strip()
+        try:
+            months = int(body.get("months") or 0)
+        except (TypeError, ValueError):
+            months = 0
         due_kind = str(body.get("dueKind") or body.get("due_kind") or "").strip().lower()
         if due_kind not in ("validation", "calibration"):
             due_kind = "calibration"
+        if months not in (3, 6, 12):
+            return jsonify({"ok": False, "error": "months must be 3, 6, or 12"}), 400
         if not last or not nxt:
             return jsonify({"ok": False, "error": "lastValidationDate and nextValidationDate are required"}), 400
         stored = data_service.get_factory_settings() or {}
         before_last = stored.get("lastValidationDate")
         before_next = stored.get("nextValidationDate")
+        before_months = stored.get("dueIntervalMonths")
+        before_kind = stored.get("dueKind")
         updated = dict(stored)
         updated["lastValidationDate"] = last
         updated["nextValidationDate"] = nxt
+        updated["dueIntervalMonths"] = months
+        updated["dueKind"] = due_kind
         data_service.save_factory_settings(updated)
-        if before_last != last or before_next != nxt:
+        if before_last != last or before_next != nxt or before_months != months or before_kind != due_kind:
             audit_action = (
                 "Validation due date set" if due_kind == "validation" else "Calibration due date set"
             )
@@ -2418,13 +2435,14 @@ def save_validation_due_dates():
                 None,
                 None,
                 audit_action,
-                "Last: {} | Next: {}".format(last, nxt),
+                "Last: {} | Next: {} | Interval: {} months".format(last, nxt, months),
             )
         saved = data_service.get_factory_settings() or {}
         return jsonify({
             "ok": True,
             "lastValidationDate": saved.get("lastValidationDate"),
             "nextValidationDate": saved.get("nextValidationDate"),
+            "dueIntervalMonths": saved.get("dueIntervalMonths"),
             "dueKind": due_kind,
         }), 200
     except Exception as e:
@@ -2457,13 +2475,24 @@ def set_report_pending_validation_due(report_id):
             return jsonify({"ok": False, "error": "months must be 3, 6, or 12"}), 400
         last = str(body.get("lastValidationDate") or "").strip()
         nxt = str(body.get("nextValidationDate") or "").strip()
+        due_kind = str(body.get("dueKind") or body.get("due_kind") or rtype).strip().lower()
+        if due_kind not in ("validation", "calibration"):
+            due_kind = rtype
         if not last or not nxt:
             return jsonify({"ok": False, "error": "lastValidationDate and nextValidationDate are required"}), 400
         report["pendingValidationDue"] = {
             "months": months,
             "lastValidationDate": last,
             "nextValidationDate": nxt,
+            "dueKind": due_kind,
         }
+        fs = report.get("factorySettings") if isinstance(report.get("factorySettings"), dict) else {}
+        fs = dict(fs)
+        fs["lastValidationDate"] = last
+        fs["nextValidationDate"] = nxt
+        fs["dueIntervalMonths"] = months
+        fs["dueKind"] = due_kind
+        report["factorySettings"] = fs
         data_service.save_report(report)
         return jsonify({"ok": True, "pendingValidationDue": report["pendingValidationDue"]}), 200
     except Exception as e:
@@ -2572,7 +2601,14 @@ def login():
                 _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account locked", target_user=username)
                 return jsonify({"error": "Account locked. Contact admin."}), 403
             if status == "disabled":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account disabled", target_user=username)
+                _audit_event(
+                    action="Login",
+                    outcome="denied",
+                    entity_type="session",
+                    entity_name="password",
+                    details=_disabled_login_audit_details(member, username),
+                    target_user=username,
+                )
                 return jsonify({"error": "Account disabled by admin."}), 403
 
         # Try authenticate
@@ -2797,7 +2833,15 @@ def login_biometric():
             _audit_event(action="Biometric login", outcome="denied", entity_type="session", entity_name="biometric", details="Account locked", target_user=username, extra={"templateId": template_id})
             return jsonify({"error": "Account locked. Contact admin."}), 403
         if status == "disabled":
-            _audit_event(action="Biometric login", outcome="denied", entity_type="session", entity_name="biometric", details="Account disabled", target_user=username, extra={"templateId": template_id})
+            _audit_event(
+                action="Biometric login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="biometric",
+                details=_disabled_login_audit_details(member, username),
+                target_user=username,
+                extra={"templateId": template_id},
+            )
             return jsonify({"error": "Account disabled by admin."}), 403
 
         if not bool(member.get("biometricEnabled", True)):

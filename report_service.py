@@ -73,6 +73,8 @@ def enrich_factory_settings(factory_settings: Dict[str, Any]) -> Dict[str, Any]:
             "instrumentId": fs_in.get("instrumentId") or "N/A",
             "lastValidationDate": fs_in.get("lastValidationDate") or "N/A",
             "nextValidationDate": fs_in.get("nextValidationDate") or "N/A",
+            "dueKind": fs_in.get("dueKind") or "",
+            "dueIntervalMonths": fs_in.get("dueIntervalMonths"),
         }
     )
     dates = _resolve_validation_dates(fs_in)
@@ -80,6 +82,10 @@ def enrich_factory_settings(factory_settings: Dict[str, Any]) -> Dict[str, Any]:
         out["lastValidationDate"] = dates["lastValidationDate"]
     if dates.get("nextValidationDate"):
         out["nextValidationDate"] = dates["nextValidationDate"]
+    if dates.get("dueKind"):
+        out["dueKind"] = dates["dueKind"]
+    if dates.get("dueIntervalMonths") in (3, 6, 12):
+        out["dueIntervalMonths"] = dates["dueIntervalMonths"]
     return out
 
 
@@ -512,6 +518,19 @@ def enrich_report_context(report_data: Dict[str, Any]) -> Dict[str, Any]:
         return report_data
     factory_settings = data_service.get_factory_settings()
     fs = report_data.get("factorySettings") or {}
+    pending = report_data.get("pendingValidationDue")
+    if isinstance(pending, dict):
+        pending_last = str(pending.get("lastValidationDate") or "").strip()
+        pending_next = str(pending.get("nextValidationDate") or "").strip()
+        if pending_last and pending_next:
+            fs["lastValidationDate"] = pending_last
+            fs["nextValidationDate"] = pending_next
+        pending_months = _normalize_due_months(pending.get("months"))
+        if pending_months is not None:
+            fs["dueIntervalMonths"] = pending_months
+        pending_kind = _normalize_due_kind(pending.get("dueKind") or report_data.get("type"))
+        if pending_kind:
+            fs["dueKind"] = pending_kind
     for k, default in [
         ("companyName", "N/A"),
         ("modelNo", "N/A"),
@@ -521,11 +540,22 @@ def enrich_report_context(report_data: Dict[str, Any]) -> Dict[str, Any]:
     ]:
         if not fs.get(k):
             fs[k] = factory_settings.get(k) or default
+    report_has_explicit_dates = _has_explicit_due_dates(fs)
     dates = _resolve_validation_dates({**factory_settings, **fs})
+    if report_has_explicit_dates:
+        dates = {
+            **dates,
+            "lastValidationDate": str(fs.get("lastValidationDate") or "").strip(),
+            "nextValidationDate": str(fs.get("nextValidationDate") or "").strip(),
+        }
     if dates.get("lastValidationDate"):
         fs["lastValidationDate"] = dates["lastValidationDate"]
     if dates.get("nextValidationDate"):
         fs["nextValidationDate"] = dates["nextValidationDate"]
+    if dates.get("dueKind"):
+        fs["dueKind"] = dates["dueKind"]
+    if dates.get("dueIntervalMonths") in (3, 6, 12):
+        fs["dueIntervalMonths"] = dates["dueIntervalMonths"]
     report_data["factorySettings"] = fs
     if str(report_data.get("type") or "").strip().lower() == "test":
         td = report_data.get("testData") if isinstance(report_data.get("testData"), dict) else report_data
@@ -578,6 +608,30 @@ def _parse_display_date(value: Any) -> Optional[datetime]:
     return _parse_report_datetime(value)
 
 
+def _is_real_display_date(value: Any) -> bool:
+    return _parse_display_date(value) is not None
+
+
+def _has_explicit_due_dates(factory_settings: Optional[Dict[str, Any]]) -> bool:
+    fs = factory_settings or {}
+    return _is_real_display_date(fs.get("lastValidationDate")) and _is_real_display_date(
+        fs.get("nextValidationDate")
+    )
+
+
+def _normalize_due_months(value: Any) -> Optional[int]:
+    try:
+        months = int(value)
+    except (TypeError, ValueError):
+        return None
+    return months if months in (3, 6, 12) else None
+
+
+def _normalize_due_kind(value: Any) -> str:
+    kind = str(value or "").strip().lower()
+    return kind if kind in ("validation", "calibration") else ""
+
+
 def _add_years(dt: datetime, years: int = 1) -> datetime:
     """Add calendar years; Feb 29 rolls to Feb 28 on non-leap years."""
     try:
@@ -588,12 +642,7 @@ def _add_years(dt: datetime, years: int = 1) -> datetime:
 
 def _validation_dates_from_last(dt: datetime, months: int = 12) -> Dict[str, str]:
     """Last validation date and next due after the given interval (default 12 months)."""
-    try:
-        months_i = int(months or 12)
-    except (TypeError, ValueError):
-        months_i = 12
-    if months_i not in (3, 6, 12):
-        months_i = 12
+    months_i = _normalize_due_months(months) or 12
     if months_i == 12:
         next_dt = _add_years(dt, 1)
     else:
@@ -614,6 +663,7 @@ def _validation_dates_from_last(dt: datetime, months: int = 12) -> Dict[str, str
     return {
         "lastValidationDate": dt.strftime("%d-%m-%Y"),
         "nextValidationDate": next_dt.strftime("%d-%m-%Y"),
+        "dueIntervalMonths": months_i,
     }
 
 
@@ -622,17 +672,27 @@ def _resolve_validation_dates(factory_settings: Optional[Dict[str, Any]] = None)
     fs = factory_settings or data_service.get_factory_settings() or {}
     last = str(fs.get("lastValidationDate") or "").strip()
     nxt = str(fs.get("nextValidationDate") or "").strip()
-    if last and nxt:
-        return {"lastValidationDate": last, "nextValidationDate": nxt}
+    due_months = _normalize_due_months(fs.get("dueIntervalMonths"))
+    due_kind = _normalize_due_kind(fs.get("dueKind"))
+    if _is_real_display_date(last) and _is_real_display_date(nxt):
+        resolved = {"lastValidationDate": last, "nextValidationDate": nxt}
+        if due_months is not None:
+            resolved["dueIntervalMonths"] = due_months
+        if due_kind:
+            resolved["dueKind"] = due_kind
+        return resolved
+    last_dt = _parse_display_date(fs.get("lastValidationDate"))
+    if last_dt:
+        resolved = _validation_dates_from_last(last_dt, due_months or 12)
+        if due_kind:
+            resolved["dueKind"] = due_kind
+        return resolved
     try:
         computed = _compute_validation_dates_from_reports()
         if computed.get("lastValidationDate"):
             return computed
     except Exception as exc:
         print(f"[REPORT] Validation date compute failed: {exc}")
-    last_dt = _parse_display_date(fs.get("lastValidationDate"))
-    if last_dt:
-        return _validation_dates_from_last(last_dt, 12)
     return {}
 
 
@@ -650,15 +710,31 @@ def apply_pending_validation_due_dates(report: Optional[Dict[str, Any]]) -> Dict
     nxt = str(pending.get("nextValidationDate") or "").strip()
     if not last or not nxt:
         return {}
+    months = _normalize_due_months(pending.get("months"))
+    due_kind = _normalize_due_kind(pending.get("dueKind") or report.get("type"))
     stored = data_service.get_factory_settings() or {}
     updated = dict(stored)
     updated["lastValidationDate"] = last
     updated["nextValidationDate"] = nxt
+    if months is not None:
+        updated["dueIntervalMonths"] = months
+    if due_kind:
+        updated["dueKind"] = due_kind
     data_service.save_factory_settings(updated)
+    fs = report.get("factorySettings") if isinstance(report.get("factorySettings"), dict) else {}
+    fs = dict(fs)
+    fs["lastValidationDate"] = last
+    fs["nextValidationDate"] = nxt
+    if months is not None:
+        fs["dueIntervalMonths"] = months
+    if due_kind:
+        fs["dueKind"] = due_kind
+    report["factorySettings"] = fs
     return {
         "lastValidationDate": last,
         "nextValidationDate": nxt,
-        "months": pending.get("months"),
+        "dueIntervalMonths": months,
+        "dueKind": due_kind,
     }
 
 
@@ -673,13 +749,14 @@ def sync_factory_validation_dates() -> Dict[str, str]:
 
 
 def _compute_validation_dates_from_reports() -> Dict[str, str]:
-    """Latest approved PASS validation report; next due from pending stash or +12 months."""
-    reports = data_service.list_reports("validation")
+    """Latest approved PASS validation/calibration report; use stored interval when available."""
+    reports = data_service.list_reports("all")
     latest = None
     latest_dt = None
     for report in reports or []:
         if str(report.get("type") or "").strip().lower() != "validation":
-            continue
+            if str(report.get("type") or "").strip().lower() != "calibration":
+                continue
         pf = str(report.get("approvalPassFail") or "").strip().upper()
         st = str(report.get("reportApprovalStatus") or "").strip().lower()
         status_raw = str(
@@ -711,12 +788,40 @@ def _compute_validation_dates_from_reports() -> Dict[str, str]:
         return {}
     pending = latest.get("pendingValidationDue") if isinstance(latest.get("pendingValidationDue"), dict) else {}
     if pending.get("lastValidationDate") and pending.get("nextValidationDate"):
-        return {
+        resolved = {
             "lastValidationDate": str(pending["lastValidationDate"]),
             "nextValidationDate": str(pending["nextValidationDate"]),
         }
-    months = pending.get("months") if pending else 12
-    return _validation_dates_from_last(latest_dt, months)
+        pending_months = _normalize_due_months(pending.get("months"))
+        pending_kind = _normalize_due_kind(pending.get("dueKind") or latest.get("type"))
+        if pending_months is not None:
+            resolved["dueIntervalMonths"] = pending_months
+        if pending_kind:
+            resolved["dueKind"] = pending_kind
+        return resolved
+    fs = latest.get("factorySettings") if isinstance(latest.get("factorySettings"), dict) else {}
+    if _has_explicit_due_dates(fs):
+        resolved = {
+            "lastValidationDate": str(fs.get("lastValidationDate") or "").strip(),
+            "nextValidationDate": str(fs.get("nextValidationDate") or "").strip(),
+        }
+        fs_months = _normalize_due_months(fs.get("dueIntervalMonths"))
+        fs_kind = _normalize_due_kind(fs.get("dueKind") or latest.get("type"))
+        if fs_months is not None:
+            resolved["dueIntervalMonths"] = fs_months
+        if fs_kind:
+            resolved["dueKind"] = fs_kind
+        return resolved
+    months = (
+        _normalize_due_months(pending.get("months"))
+        or _normalize_due_months(fs.get("dueIntervalMonths"))
+        or 12
+    )
+    resolved = _validation_dates_from_last(latest_dt, months)
+    due_kind = _normalize_due_kind(pending.get("dueKind") or fs.get("dueKind") or latest.get("type"))
+    if due_kind:
+        resolved["dueKind"] = due_kind
+    return resolved
 
 
 def resolve_validation_result_status(report: Optional[Dict[str, Any]]) -> str:

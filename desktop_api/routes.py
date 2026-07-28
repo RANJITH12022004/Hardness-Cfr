@@ -152,6 +152,12 @@ def create_blueprint(kiosk):
         elif audit_log:
             audit_log(user.get("username") or user.get("name"), user.get("role"), action, details)
 
+    def disabled_login_details(member, username):
+        member = member or {}
+        attempted_username = str(member.get("username") or username or "").strip() or "--"
+        attempted_name = str(member.get("name") or "").strip() or "--"
+        return "Disabled user {} ({}) tried to log in".format(attempted_username, attempted_name)
+
     def _desktop_app_name(factory):
         """Product-agnostic display name for multi-machine desktop clients."""
         env_name = (os.environ.get("DESKTOP_APP_NAME") or "").strip()
@@ -197,7 +203,7 @@ def create_blueprint(kiosk):
     def desktop_auth_login():
         try:
             credentials = request.get_json(force=True, silent=True) or {}
-            username = str(credentials.get("username") or "").strip()
+            username = " ".join(str(credentials.get("username") or "").split())
             password = credentials.get("password") if isinstance(credentials.get("password"), str) else str(credentials.get("password") or "")
             if not username:
                 return jsonify({"error": "Username is required."}), 400
@@ -205,9 +211,30 @@ def create_blueprint(kiosk):
             if member:
                 status = str(member.get("status") or "active").strip().lower()
                 if status == "disabled":
+                    detail = disabled_login_details(member, username)
+                    if audit_event:
+                        audit_event(
+                            action="Desktop login",
+                            outcome="denied",
+                            entity_type="desktop",
+                            entity_name="password",
+                            details=detail,
+                            target_user=member.get("username") or username,
+                        )
+                    elif audit_log:
+                        audit_log(username, "--", "Desktop login", detail)
                     return jsonify({"error": "Account disabled by admin."}), 403
             user = data_service.authenticate_user(username, password)
             if not user:
+                try:
+                    members = data_service.list_members() or []
+                except Exception:
+                    members = []
+                if not members:
+                    return jsonify({
+                        "error": "No member accounts are configured on this machine (members list is empty). Factory login still works; restore members or create users on the kiosk.",
+                        "membersEmpty": True,
+                    }), 401
                 body = {"error": "Invalid username or password."}
                 return jsonify(body), 401
             if username.upper() != data_service.FACTORY_USERNAME.upper():

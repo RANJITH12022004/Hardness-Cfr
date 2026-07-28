@@ -1027,6 +1027,7 @@ function confirmCalibrationDue(months) {
     var datesBody = {
         lastValidationDate: lastFormatted,
         nextValidationDate: nextFormatted,
+        months: months,
         dueKind: dueKind
     };
     var datesReq = fetch('/api/data/factory-settings/validation-dates', {
