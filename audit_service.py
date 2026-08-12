@@ -756,22 +756,33 @@ def write_audit_export_schedule(batches: List[Dict[str, Any]]) -> None:
         json.dump(batches, f, indent=2, ensure_ascii=False)
 
 
-def stage_audit_export(entry_ids: List[int], exporter_username: str, approver_username: str) -> Dict[str, Any]:
-    """Create a pending export batch; returns batch dict with id."""
-    ids = []
-    for eid in entry_ids or []:
-        try:
-            n = int(eid)
-            if n > 0:
-                ids.append(n)
-        except (TypeError, ValueError):
+def _normalize_audit_entry_ids(entry_ids: List[Any]) -> List[str]:
+    ids: List[str] = []
+    seen = set()
+    for entry_id in entry_ids or []:
+        value = str(entry_id or "").strip()
+        if not value or value in seen:
             continue
+        seen.add(value)
+        ids.append(value)
+    return ids
+
+
+def stage_audit_export(
+    entry_ids: List[Any],
+    exporter_username: str,
+    approver_username: str,
+    filters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Create a pending export batch; returns batch dict with id."""
+    ids = _normalize_audit_entry_ids(entry_ids)
     batch_id = secrets.token_hex(8)
     batch = {
         "id": batch_id,
         "entryIds": ids,
         "exporterUsername": (exporter_username or "").strip(),
         "approverUsername": (approver_username or "").strip(),
+        "filters": dict(filters or {}),
         "stagedAt": int(time.time() * 1000),
         "confirmedAt": None,
         "purged": False,
@@ -783,7 +794,11 @@ def stage_audit_export(entry_ids: List[int], exporter_username: str, approver_us
     return batch
 
 
-def confirm_audit_export_batch(batch_id: str, pdf_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def confirm_audit_export_batch(
+    batch_id: str,
+    pdf_path: Optional[str] = None,
+    approver_username: str = "",
+) -> Optional[Dict[str, Any]]:
     batches = read_audit_export_schedule()
     found = None
     for b in batches:
@@ -791,6 +806,8 @@ def confirm_audit_export_batch(batch_id: str, pdf_path: Optional[str] = None) ->
             b["confirmedAt"] = int(time.time() * 1000)
             if pdf_path:
                 b["pdfPath"] = str(pdf_path)
+            if approver_username:
+                b["approverUsername"] = str(approver_username).strip()
             found = b
             break
     if found:
@@ -798,18 +815,11 @@ def confirm_audit_export_batch(batch_id: str, pdf_path: Optional[str] = None) ->
     return found
 
 
-def delete_entries_by_ids(entry_ids: List[int]) -> int:
+def delete_entries_by_ids(entry_ids: List[Any]) -> int:
     """Delete audit rows with matching primary keys only."""
     if not entry_ids or not _audit_db_path or not _audit_db_path.exists():
         return 0
-    ids = []
-    for eid in entry_ids:
-        try:
-            n = int(eid)
-            if n > 0:
-                ids.append(n)
-        except (TypeError, ValueError):
-            continue
+    ids = _normalize_audit_entry_ids(entry_ids)
     if not ids:
         return 0
     conn = _db_connect()

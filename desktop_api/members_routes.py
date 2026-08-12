@@ -172,6 +172,13 @@ def register_members_routes(bp, kiosk):
             member = data_service.get_member(member_id)
             if not member:
                 return jsonify({"error": "Member not found"}), 404
+            target_username = str(member.get("username") or "").strip()
+            target_name = str(member.get("name") or target_username or "").strip() or "--"
+            if target_username.upper() == data_service.FACTORY_USERNAME.upper():
+                return jsonify({"error": "The factory profile cannot be disabled."}), 403
+            disabler_username = str(user.get("username") or user.get("name") or "").strip() or "--"
+            disabler_name = str(user.get("name") or disabler_username).strip() or "--"
+            disabler_role = str(user.get("role") or "").strip() or "--"
             verified, verify_err = auth_store.consume_approval_verify_token("user_admin")
             if not verified:
                 audit_event(
@@ -187,6 +194,39 @@ def register_members_routes(bp, kiosk):
                     before=member,
                 )
                 return jsonify({"error": verify_err}), 403
+            approver_username = str(verified.get("username") or verified.get("name") or "").strip() or "--"
+            approver_name = str(verified.get("name") or approver_username).strip() or "--"
+            approver_role = str(verified.get("role") or "").strip() or "--"
+            if (
+                approver_username.lower() == disabler_username.lower()
+                and disabler_role.lower() != "factory"
+            ):
+                detail = "Requester {} ({}) cannot approve disabling {} ({})".format(
+                    disabler_name,
+                    disabler_username,
+                    target_name,
+                    target_username or "--",
+                )
+                audit_event(
+                    kiosk,
+                    user,
+                    action="User disable",
+                    outcome="denied",
+                    entity_type="member",
+                    entity_id=member_id,
+                    entity_name=target_username or target_name,
+                    details=detail,
+                    target_user=target_username,
+                    before=member,
+                    signature={
+                        "mode": "password_reconfirm",
+                        "username": approver_username,
+                        "role": approver_role,
+                    },
+                )
+                return jsonify({
+                    "error": "Approver must be a different user with Profile management permission."
+                }), 403
             before_member = dict(member)
             template_id = member.get("fingerprintTemplateId")
             if template_id is not None:
@@ -225,6 +265,16 @@ def register_members_routes(bp, kiosk):
                 except ImportError:
                     pass
             member = data_service.disable_member(member_id)
+            detail = (
+                "Member disabled: {} ({}) | disabled by: {} ({}) | approved by: {} ({})"
+            ).format(
+                target_name,
+                target_username or "--",
+                disabler_name,
+                disabler_username,
+                approver_name,
+                approver_username,
+            )
             audit_event(
                 kiosk,
                 user,
@@ -233,7 +283,7 @@ def register_members_routes(bp, kiosk):
                 entity_type="member",
                 entity_id=member_id,
                 entity_name=member.get("username") or member.get("name") or "",
-                details="Member disabled",
+                details=detail,
                 target_user=member.get("username") or "",
                 before=before_member,
                 after=member,
@@ -242,7 +292,17 @@ def register_members_routes(bp, kiosk):
                     "username": verified.get("username"),
                     "role": verified.get("role"),
                 },
-                extra={"templateIdFreed": template_id},
+                extra={
+                    "templateIdFreed": template_id,
+                    "disabledMemberUsername": target_username,
+                    "disabledMemberName": target_name,
+                    "disabledByUsername": disabler_username,
+                    "disabledByName": disabler_name,
+                    "disabledByRole": disabler_role,
+                    "approvedByUsername": approver_username,
+                    "approvedByName": approver_name,
+                    "approvedByRole": approver_role,
+                },
             )
             return jsonify({"success": True, "member": member}), 200
         except ValueError as e:
@@ -428,7 +488,6 @@ def register_members_routes(bp, kiosk):
                 return jsonify({"ok": False, "error": "Unsupported verification method"}), 400
 
             verifier_role = str(verifier.get("role") or "").strip().lower()
-            report_type_for_verify = None
             eligible_fn = getattr(kiosk, "_approval_verifier_eligible_for_recipe", None)
             if purpose == "recipe":
                 if eligible_fn:
@@ -436,14 +495,10 @@ def register_members_routes(bp, kiosk):
                 else:
                     eligible = auth_store._verifier_payload_has_internal(verifier, "recipe-approve")
             elif purpose == "report":
-                report_type_for_verify = auth_store._resolve_report_type_for_approval_verify(payload)
                 fn = getattr(kiosk, "_approval_verifier_eligible_for_report", None)
-                if fn:
-                    eligible = fn(verifier, report_type_for_verify)
-                else:
-                    eligible = auth_store._verifier_payload_has_internal(
-                        verifier, auth_store._report_approval_internal_key(report_type_for_verify)
-                    )
+                eligible = fn(verifier) if fn else auth_store._verifier_payload_has_internal(
+                    verifier, "test-report-approve"
+                )
             elif purpose == "export":
                 eligible = auth_store._verifier_payload_has_internal(verifier, "export-approve")
             else:
@@ -486,11 +541,7 @@ def register_members_routes(bp, kiosk):
                         )
                         return jsonify({"ok": False, "error": "Verifier account is not active"}), 403
 
-            token, token_payload = auth_store.issue_approval_verify_token(
-                verifier,
-                purpose,
-                report_type=report_type_for_verify if purpose == "report" else None,
-            )
+            token, token_payload = auth_store.issue_approval_verify_token(verifier, purpose)
             vname = verifier.get("username") or username
             audit_event(
                 kiosk,

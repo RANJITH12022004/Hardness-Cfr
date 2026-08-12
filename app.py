@@ -260,8 +260,17 @@ def _audit_event(
     signature=None,
     event_type="compliance",
     extra=None,
+    actor_user=None,
+    actor_role=None,
+    actor_name=None,
 ):
     actor = _audit_actor()
+    if actor_user is not None:
+        actor["user"] = str(actor_user or "").strip() or "--"
+    if actor_role is not None:
+        actor["role"] = str(actor_role or "").strip() or "--"
+    if actor_name is not None:
+        actor["name"] = str(actor_name or "").strip() or actor.get("user") or "--"
     audit_time = _audit_time_fields()
     signature = signature or {}
     before_clean = _sanitize_audit_payload(before)
@@ -297,7 +306,29 @@ def _disabled_login_audit_details(member, username):
     member = member or {}
     attempted_username = str(member.get("username") or username or "").strip() or "--"
     attempted_name = str(member.get("name") or "").strip() or "--"
-    return "Disabled user {} ({}) tried to log in".format(attempted_username, attempted_name)
+    return "Disabled account {} ({}) tried to log in".format(attempted_username, attempted_name)
+
+
+def _locked_login_audit_details(member, username):
+    member = member or {}
+    attempted_username = str(member.get("username") or username or "").strip() or "--"
+    attempted_name = str(member.get("name") or "").strip() or "--"
+    return "Locked account {} ({}) tried to log in".format(attempted_username, attempted_name)
+
+
+def _wrong_password_audit_details(member, username, attempt, maximum):
+    member = member or {}
+    attempted_username = str(member.get("username") or username or "").strip() or "--"
+    attempted_name = str(member.get("name") or "").strip() or "--"
+    detail = "User {} ({}) entered the wrong password - attempt {}/{}".format(
+        attempted_username,
+        attempted_name,
+        attempt,
+        maximum,
+    )
+    if int(attempt) >= int(maximum):
+        detail += "; account locked"
+    return detail
 
 
 
@@ -2591,6 +2622,16 @@ def login():
                     after={"username": user.get("username"), "role": user.get("role")},
                 )
                 return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user}), 200
+            _audit_event(
+                action="Login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="password",
+                details="User {} (Factory) entered the wrong password; attempt not counted for the factory account".format(
+                    username or data_service.FACTORY_USERNAME
+                ),
+                target_user=username or data_service.FACTORY_USERNAME,
+            )
             return jsonify({"error": "Invalid username or password"}), 401
 
         # Normal member: check status first
@@ -2598,7 +2639,14 @@ def login():
         if member:
             status = str(member.get("status") or "active").strip().lower()
             if status == "locked":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account locked", target_user=username)
+                _audit_event(
+                    action="Login",
+                    outcome="denied",
+                    entity_type="session",
+                    entity_name="password",
+                    details=_locked_login_audit_details(member, username),
+                    target_user=username,
+                )
                 return jsonify({"error": "Account locked. Contact admin."}), 403
             if status == "disabled":
                 _audit_event(
@@ -2673,10 +2721,24 @@ def login():
                 fa = int(updated.get("failedAttempts") or 0)
             except (TypeError, ValueError):
                 fa = 0
-            remaining = max(0, 3 - fa)
+            maximum = data_service.MAX_FAILED_LOGIN_ATTEMPTS
+            remaining = max(0, maximum - fa)
+            details = _wrong_password_audit_details(updated, username, fa, maximum)
+            _audit_event(
+                action="Login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="password",
+                details=details,
+                target_user=updated.get("username") or username,
+                extra={
+                    "failedAttempts": fa,
+                    "maximumAttempts": maximum,
+                    "remainingAttempts": remaining,
+                },
+            )
             # If this attempt caused the account to become locked, show lockout immediately
             if status == "locked":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account locked after failed attempts", target_user=username)
                 return jsonify({
                     "error": "Account locked. Contact admin.",
                     "remainingAttempts": 0
@@ -2685,6 +2747,15 @@ def login():
                 "error": "Invalid username or password.",
                 "remainingAttempts": remaining
             }), 401
+        if username:
+            _audit_event(
+                action="Login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="password",
+                details="Unknown user ID {} entered invalid login credentials; attempt not counted".format(username),
+                target_user=username,
+            )
         return jsonify({"error": "Invalid username or password"}), 401
     except OSError as e:
         app.logger.exception("Error during login (storage)")
@@ -2830,7 +2901,15 @@ def login_biometric():
         username = member.get("username") or ""
         status = str(member.get("status") or "active").strip().lower()
         if status == "locked":
-            _audit_event(action="Biometric login", outcome="denied", entity_type="session", entity_name="biometric", details="Account locked", target_user=username, extra={"templateId": template_id})
+            _audit_event(
+                action="Biometric login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="biometric",
+                details=_locked_login_audit_details(member, username),
+                target_user=username,
+                extra={"templateId": template_id},
+            )
             return jsonify({"error": "Account locked. Contact admin."}), 403
         if status == "disabled":
             _audit_event(
@@ -3825,7 +3904,7 @@ def audit_export_stage():
         entries = audit_service.list_entries(filters)
         entry_ids = [e.get("id") for e in entries if e.get("id") is not None]
         exporter = str((cur or {}).get("username") or (cur or {}).get("name") or "").strip()
-        batch = audit_service.stage_audit_export(entry_ids, exporter, "")
+        batch = audit_service.stage_audit_export(entry_ids, exporter, "", filters=filters)
         return jsonify({
             "success": True,
             "batchId": batch.get("id"),
@@ -3948,7 +4027,7 @@ def export_audit_trails():
         batch_id = (data.get("batch_id") or data.get("batchId") or "").strip()
         ap_u, _ap_n, _ap_r = _export_approved_by_from_verifier(export_verifier, cur=cur)
         if batch_id:
-            audit_service.confirm_audit_export_batch(batch_id, str(out_path))
+            audit_service.confirm_audit_export_batch(batch_id, str(out_path), approver_username=ap_u)
             _audit_export_action(
                 "Audit export cycle started",
                 "entries={} | batch={}".format(len(entries), batch_id),

@@ -1,4 +1,4 @@
-"""Recipe data helpers that work across Hardness and Hardness storage models."""
+"""Recipe data helpers that work across Tap Density and Friability storage models."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def list_recipes(status: str = "active") -> List[Dict[str, Any]]:
         recipes = fn(status=status)
         return list(recipes or [])
     except TypeError:
-        # Hardness / older: list_recipes(filter_type=None) only.
+        # Friability / older: list_recipes(filter_type=None) only.
         recipes = list(fn() or [])
         if status == "all":
             return recipes

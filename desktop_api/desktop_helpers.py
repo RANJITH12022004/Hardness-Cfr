@@ -117,6 +117,9 @@ def audit_event(kiosk, user, **kwargs):
     if fn:
         sig = kwargs.get("signature") or desktop_signature(user)
         kwargs["signature"] = sig
+        kwargs["actor_user"] = (user or {}).get("username") or (user or {}).get("name") or "--"
+        kwargs["actor_role"] = (user or {}).get("role") or "--"
+        kwargs["actor_name"] = (user or {}).get("name") or kwargs["actor_user"]
         return fn(**kwargs)
 
     audit_time = _audit_time_fields(kiosk)

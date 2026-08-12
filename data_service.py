@@ -35,6 +35,7 @@ _log = logging.getLogger(__name__)
 
 FACTORY_USERNAME = "RLERLT"
 FACTORY_PASSWORD = "Rahul"
+MAX_FAILED_LOGIN_ATTEMPTS = 3
 FACTORY_USER = {
     "id": 0,
     "name": "Factory",
@@ -1313,7 +1314,7 @@ def record_failed_login(username: str) -> Optional[Dict[str, Any]]:
     except (TypeError, ValueError):
         fa = 0
     fa += 1
-    if fa >= 3 and status == "active":
+    if fa >= MAX_FAILED_LOGIN_ATTEMPTS and status == "active":
         status = "locked"
     m["failedAttempts"] = fa
     m["status"] = status
@@ -1335,13 +1336,14 @@ def record_successful_login(username: str) -> Optional[Dict[str, Any]]:
 
 
 def unlock_member(member_id: int) -> Dict[str, Any]:
-    """Set member status to active. Preserves failedAttempts."""
+    """Set member status to active and reset the login-attempt counter."""
     m = get_member(member_id)
     if not m:
         raise ValueError("Member not found")
     if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
         raise ValueError("The factory user cannot be modified.")
     m["status"] = "active"
+    m["failedAttempts"] = 0
     _save_member_record(m)
     return m
 
@@ -1359,13 +1361,14 @@ def disable_member(member_id: int) -> Dict[str, Any]:
 
 
 def enable_member(member_id: int) -> Dict[str, Any]:
-    """Set member status to active. Preserves failedAttempts."""
+    """Set member status to active and reset the login-attempt counter."""
     m = get_member(member_id)
     if not m:
         raise ValueError("Member not found")
     if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
         raise ValueError("The factory user cannot be modified.")
     m["status"] = "active"
+    m["failedAttempts"] = 0
     _save_member_record(m)
     return m
 

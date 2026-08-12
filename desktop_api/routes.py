@@ -156,7 +156,41 @@ def create_blueprint(kiosk):
         member = member or {}
         attempted_username = str(member.get("username") or username or "").strip() or "--"
         attempted_name = str(member.get("name") or "").strip() or "--"
-        return "Disabled user {} ({}) tried to log in".format(attempted_username, attempted_name)
+        return "Disabled account {} ({}) tried to log in".format(attempted_username, attempted_name)
+
+    def locked_login_details(member, username):
+        member = member or {}
+        attempted_username = str(member.get("username") or username or "").strip() or "--"
+        attempted_name = str(member.get("name") or "").strip() or "--"
+        return "Locked account {} ({}) tried to log in".format(attempted_username, attempted_name)
+
+    def wrong_password_details(member, username, attempt, maximum):
+        member = member or {}
+        attempted_username = str(member.get("username") or username or "").strip() or "--"
+        attempted_name = str(member.get("name") or "").strip() or "--"
+        detail = "User {} ({}) entered the wrong password - attempt {}/{}".format(
+            attempted_username,
+            attempted_name,
+            attempt,
+            maximum,
+        )
+        if int(attempt) >= int(maximum):
+            detail += "; account locked"
+        return detail
+
+    def log_denied_login(detail, target_user, extra=None):
+        if audit_event:
+            audit_event(
+                action="Desktop login",
+                outcome="denied",
+                entity_type="desktop",
+                entity_name="password",
+                details=detail,
+                target_user=target_user,
+                extra=extra,
+            )
+        elif audit_log:
+            audit_log(target_user or "--", "--", "Desktop login", detail)
 
     def _desktop_app_name(factory):
         """Product-agnostic display name for multi-machine desktop clients."""
@@ -210,26 +244,63 @@ def create_blueprint(kiosk):
             member = data_service.get_member_by_username(username)
             if member:
                 status = str(member.get("status") or "active").strip().lower()
+                if status == "locked":
+                    log_denied_login(
+                        locked_login_details(member, username),
+                        member.get("username") or username,
+                    )
+                    return jsonify({"error": "Account locked. Contact admin."}), 403
                 if status == "disabled":
                     detail = disabled_login_details(member, username)
-                    if audit_event:
-                        audit_event(
-                            action="Desktop login",
-                            outcome="denied",
-                            entity_type="desktop",
-                            entity_name="password",
-                            details=detail,
-                            target_user=member.get("username") or username,
-                        )
-                    elif audit_log:
-                        audit_log(username, "--", "Desktop login", detail)
+                    log_denied_login(detail, member.get("username") or username)
                     return jsonify({"error": "Account disabled by admin."}), 403
             user = data_service.authenticate_user(username, password)
             if not user:
+                if username.upper() == data_service.FACTORY_USERNAME.upper():
+                    log_denied_login(
+                        "User {} (Factory) entered the wrong password; attempt not counted for the factory account".format(
+                            username or data_service.FACTORY_USERNAME
+                        ),
+                        username or data_service.FACTORY_USERNAME,
+                    )
+                    return jsonify({"error": "Invalid username or password."}), 401
+                updated = data_service.record_failed_login(username)
+                if updated:
+                    try:
+                        failed_attempts = int(updated.get("failedAttempts") or 0)
+                    except (TypeError, ValueError):
+                        failed_attempts = 0
+                    maximum = data_service.MAX_FAILED_LOGIN_ATTEMPTS
+                    remaining = max(0, maximum - failed_attempts)
+                    log_denied_login(
+                        wrong_password_details(updated, username, failed_attempts, maximum),
+                        updated.get("username") or username,
+                        {
+                            "failedAttempts": failed_attempts,
+                            "maximumAttempts": maximum,
+                            "remainingAttempts": remaining,
+                        },
+                    )
+                    if str(updated.get("status") or "").strip().lower() == "locked":
+                        return jsonify({
+                            "error": "Account locked. Contact admin.",
+                            "remainingAttempts": 0,
+                        }), 403
+                    return jsonify({
+                        "error": "Invalid username or password.",
+                        "remainingAttempts": remaining,
+                    }), 401
                 try:
                     members = data_service.list_members() or []
                 except Exception:
                     members = []
+                if username:
+                    log_denied_login(
+                        "Unknown user ID {} entered invalid login credentials; attempt not counted".format(
+                            username
+                        ),
+                        username,
+                    )
                 if not members:
                     return jsonify({
                         "error": "No member accounts are configured on this machine (members list is empty). Factory login still works; restore members or create users on the kiosk.",
@@ -244,11 +315,6 @@ def create_blueprint(kiosk):
                     if bool(expiry.get("expired")):
                         return jsonify({"error": "Password expired. Reset required.", "passwordExpired": True, "expiry": expiry}), 403
             data_service.record_successful_login(username)
-            member_after = data_service.get_member_by_username(username)
-            if member_after and str(member_after.get("status") or "").strip().lower() == "locked":
-                member_after["status"] = "active"
-                member_after["failedAttempts"] = 0
-                data_service._save_member_record(member_after)
             token, safe_user = auth_store.issue_token(user)
             log_audit(safe_user, "Desktop login", "Desktop user logged in: {}".format(username))
             return jsonify({"success": True, "token": token, "user": safe_user}), 200

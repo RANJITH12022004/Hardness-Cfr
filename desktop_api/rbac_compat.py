@@ -1,4 +1,4 @@
-"""RBAC helpers that work across Hardness, Hardness, and future products."""
+"""RBAC helpers that work across Tap Density, Friability, and future products."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def permission_allow_cards(member: Optional[Dict[str, Any]]) -> List[str]:
     if callable(fn):
         return list(fn(member) or [])
 
-    # Hardness / older rbac: derive cards from expanded internals + PERM_CARD_EXPAND.
+    # Friability / older rbac: derive cards from expanded internals + PERM_CARD_EXPAND.
     expand = getattr(rbac_service, "PERM_CARD_EXPAND", {}) or {}
     try:
         internals = set(rbac_service.member_expanded_internal_keys(member or {}) or [])
