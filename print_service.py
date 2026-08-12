@@ -115,6 +115,10 @@ _PRINTER_INIT_SEQ = b'\x1b\x40'
 _log = logging.getLogger(__name__)
 
 
+def _display_date(value: Any) -> str:
+    return report_service.format_display_date(value) or "N/A"
+
+
 def _open_a4_serial(port: str, baud: int) -> serial.Serial:
     """Open A4 serial port with explicit parameters. Retries once on failure."""
     params = dict(
@@ -534,8 +538,8 @@ def _format_recipe_text(recipe_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         lines.append(f"Serial No: {factory_settings.get('serialNo', 'N/A')}")
         lines.append(f"Location: {factory_settings.get('companyLocation') or factory_settings.get('location', 'N/A')}")
         lines.append(f"Instrument ID: {factory_settings.get('instrumentId', 'N/A')}")
-        lines.append(f"Last Validation: {factory_settings.get('lastValidationDate', 'N/A')}")
-        lines.append(f"Next Validation Due: {factory_settings.get('nextValidationDate', 'N/A')}")
+        lines.append(f"Last Validation: {_display_date(factory_settings.get('lastValidationDate', 'N/A'))}")
+        lines.append(f"Next Validation Due: {_display_date(factory_settings.get('nextValidationDate', 'N/A'))}")
         lines.append("")
 
     lines.append(f"Product: {product}")
@@ -785,8 +789,8 @@ def _format_validation_calibration_text(report_data: Dict[str, Any], width: int 
             lines.append(f"Model No: {factory_settings.get('modelNo', 'N/A')}")
             lines.append(f"Serial No: {factory_settings.get('serialNo', 'N/A')}")
             lines.append(f"Instrument ID: {factory_settings.get('instrumentId', 'N/A')}")
-            lines.append(f"Last Validation: {factory_settings.get('lastValidationDate', 'N/A')}")
-            lines.append(f"Next Validation Due: {factory_settings.get('nextValidationDate', 'N/A')}")
+            lines.append(f"Last Validation: {_display_date(factory_settings.get('lastValidationDate', 'N/A'))}")
+            lines.append(f"Next Validation Due: {_display_date(factory_settings.get('nextValidationDate', 'N/A'))}")
         else:
             _append_two_column_pairs(
                 lines,
@@ -796,8 +800,8 @@ def _format_validation_calibration_text(report_data: Dict[str, Any], width: int 
                     ("Serial No", factory_settings.get("serialNo", "N/A")),
                     ("Location", factory_settings.get("companyLocation", factory_settings.get("location", "N/A"))),
                     ("Instrument ID", factory_settings.get("instrumentId", "N/A")),
-                    ("Last Val", factory_settings.get("lastValidationDate", "N/A")),
-                    ("Next Val Due", factory_settings.get("nextValidationDate", "N/A")),
+                    ("Last Val", _display_date(factory_settings.get("lastValidationDate", "N/A"))),
+                    ("Next Val Due", _display_date(factory_settings.get("nextValidationDate", "N/A"))),
                 ],
                 width,
             )
@@ -991,7 +995,7 @@ def _report_timestamp_lines(kind: str = "printed") -> list:
         ptime = payload.get("time") or "--"
     except Exception:
         now = datetime.now()
-        pdate = now.strftime("%d-%m-%Y")
+        pdate = now.strftime("%d/%m/%Y")
         ptime = now.strftime("%H:%M:%S")
     label = "Export" if str(kind or "").strip().lower() == "export" else "Printed"
     return ["", f"{label} Date: {pdate}", f"{label} Time: {ptime}"]
@@ -1086,8 +1090,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             lines.append(f"Serial No: {factory_settings.get('serialNo', 'N/A')}")
             lines.append(f"Location: {factory_settings.get('companyLocation', 'N/A')}")
             lines.append(f"Instrument ID: {factory_settings.get('instrumentId', 'N/A')}")
-            lines.append(f"Last Val: {factory_settings.get('lastValidationDate', 'N/A')}")
-            lines.append(f"Next Val Due: {factory_settings.get('nextValidationDate', 'N/A')}")
+            lines.append(f"Last Val: {_display_date(factory_settings.get('lastValidationDate', 'N/A'))}")
+            lines.append(f"Next Val Due: {_display_date(factory_settings.get('nextValidationDate', 'N/A'))}")
         else:
             _append_two_column_pairs(
                 lines,
@@ -1097,8 +1101,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                     ("Serial No", factory_settings.get("serialNo", "N/A")),
                     ("Location", factory_settings.get("companyLocation", factory_settings.get("location", "N/A"))),
                     ("Instrument ID", factory_settings.get("instrumentId", "N/A")),
-                    ("Last Val", factory_settings.get("lastValidationDate", "N/A")),
-                    ("Next Val Due", factory_settings.get("nextValidationDate", "N/A")),
+                    ("Last Val", _display_date(factory_settings.get("lastValidationDate", "N/A"))),
+                    ("Next Val Due", _display_date(factory_settings.get("nextValidationDate", "N/A"))),
                 ],
                 width,
             )

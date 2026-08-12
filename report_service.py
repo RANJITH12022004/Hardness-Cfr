@@ -77,6 +77,8 @@ def enrich_factory_settings(factory_settings: Dict[str, Any]) -> Dict[str, Any]:
             "dueIntervalMonths": fs_in.get("dueIntervalMonths"),
         }
     )
+    out["lastValidationDate"] = format_display_date(out.get("lastValidationDate")) or "N/A"
+    out["nextValidationDate"] = format_display_date(out.get("nextValidationDate")) or "N/A"
     dates = _resolve_validation_dates(fs_in)
     if dates.get("lastValidationDate"):
         out["lastValidationDate"] = dates["lastValidationDate"]
@@ -215,7 +217,7 @@ def _report_print_timestamp() -> Dict[str, str]:
     except Exception:
         now = datetime.now()
         return {
-            "printDate": now.strftime("%d-%m-%Y"),
+            "printDate": now.strftime("%d/%m/%Y"),
             "printTime": now.strftime("%H:%M:%S"),
         }
 
@@ -545,8 +547,8 @@ def enrich_report_context(report_data: Dict[str, Any]) -> Dict[str, Any]:
     if report_has_explicit_dates:
         dates = {
             **dates,
-            "lastValidationDate": str(fs.get("lastValidationDate") or "").strip(),
-            "nextValidationDate": str(fs.get("nextValidationDate") or "").strip(),
+            "lastValidationDate": format_display_date(fs.get("lastValidationDate")),
+            "nextValidationDate": format_display_date(fs.get("nextValidationDate")),
         }
     if dates.get("lastValidationDate"):
         fs["lastValidationDate"] = dates["lastValidationDate"]
@@ -608,6 +610,14 @@ def _parse_display_date(value: Any) -> Optional[datetime]:
     return _parse_report_datetime(value)
 
 
+def format_display_date(value: Any) -> str:
+    """Normalize display dates to DD/MM/YYYY while leaving non-dates untouched."""
+    dt = _parse_display_date(value)
+    if dt is not None:
+        return dt.strftime("%d/%m/%Y")
+    return str(value or "").strip()
+
+
 def _is_real_display_date(value: Any) -> bool:
     return _parse_display_date(value) is not None
 
@@ -661,8 +671,8 @@ def _validation_dates_from_last(dt: datetime, months: int = 12) -> Dict[str, str
                     next_dt = _add_years(dt, 1)
                     break
     return {
-        "lastValidationDate": dt.strftime("%d-%m-%Y"),
-        "nextValidationDate": next_dt.strftime("%d-%m-%Y"),
+        "lastValidationDate": dt.strftime("%d/%m/%Y"),
+        "nextValidationDate": next_dt.strftime("%d/%m/%Y"),
         "dueIntervalMonths": months_i,
     }
 
@@ -675,7 +685,10 @@ def _resolve_validation_dates(factory_settings: Optional[Dict[str, Any]] = None)
     due_months = _normalize_due_months(fs.get("dueIntervalMonths"))
     due_kind = _normalize_due_kind(fs.get("dueKind"))
     if _is_real_display_date(last) and _is_real_display_date(nxt):
-        resolved = {"lastValidationDate": last, "nextValidationDate": nxt}
+        resolved = {
+            "lastValidationDate": format_display_date(last),
+            "nextValidationDate": format_display_date(nxt),
+        }
         if due_months is not None:
             resolved["dueIntervalMonths"] = due_months
         if due_kind:
@@ -789,8 +802,8 @@ def _compute_validation_dates_from_reports() -> Dict[str, str]:
     pending = latest.get("pendingValidationDue") if isinstance(latest.get("pendingValidationDue"), dict) else {}
     if pending.get("lastValidationDate") and pending.get("nextValidationDate"):
         resolved = {
-            "lastValidationDate": str(pending["lastValidationDate"]),
-            "nextValidationDate": str(pending["nextValidationDate"]),
+            "lastValidationDate": format_display_date(pending["lastValidationDate"]),
+            "nextValidationDate": format_display_date(pending["nextValidationDate"]),
         }
         pending_months = _normalize_due_months(pending.get("months"))
         pending_kind = _normalize_due_kind(pending.get("dueKind") or latest.get("type"))
@@ -802,8 +815,8 @@ def _compute_validation_dates_from_reports() -> Dict[str, str]:
     fs = latest.get("factorySettings") if isinstance(latest.get("factorySettings"), dict) else {}
     if _has_explicit_due_dates(fs):
         resolved = {
-            "lastValidationDate": str(fs.get("lastValidationDate") or "").strip(),
-            "nextValidationDate": str(fs.get("nextValidationDate") or "").strip(),
+            "lastValidationDate": format_display_date(fs.get("lastValidationDate")),
+            "nextValidationDate": format_display_date(fs.get("nextValidationDate")),
         }
         fs_months = _normalize_due_months(fs.get("dueIntervalMonths"))
         fs_kind = _normalize_due_kind(fs.get("dueKind") or latest.get("type"))

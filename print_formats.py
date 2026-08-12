@@ -18,6 +18,8 @@ import uuid
 import sys
 from html import unescape
 
+import report_service
+
 SIMULATE = (
     os.environ.get("SIMULATE_HARDWARE", "").strip().lower() in ("1", "true", "yes")
     or sys.platform == "win32"
@@ -129,13 +131,13 @@ def generate_text_report(report_data, txt_path, layout='a4'):
             thin_line = "\n"
 
             def format_dt(dt_str):
-                """Format ISO-ish datetime into 'DD-MM-YYYY HH:MM' (avoid noisy raw strings)."""
+                """Format ISO-ish datetime into 'DD/MM/YYYY HH:MM:SS'."""
                 if not dt_str:
                     return 'N/A'
                 try:
                     from datetime import datetime
                     dt = datetime.fromisoformat(str(dt_str).replace('Z', '+00:00'))
-                    return dt.strftime('%d-%m-%Y %H:%M:%S')
+                    return dt.strftime('%d/%m/%Y %H:%M:%S')
                 except Exception:
                     return str(dt_str)
 
@@ -161,8 +163,12 @@ def generate_text_report(report_data, txt_path, layout='a4'):
             serial_no = factory_settings.get('serialNo') or report_data.get('serialNo') or 'N/A'
             location = factory_settings.get('companyLocation') or report_data.get('location') or 'N/A'
             instrument_id = factory_settings.get('instrumentId') or report_data.get('instrumentId') or 'N/A'
-            last_validation = factory_settings.get('lastValidationDate') or report_data.get('lastValidationDate') or 'N/A'
-            next_validation = factory_settings.get('nextValidationDate') or report_data.get('nextValidationDate') or 'N/A'
+            last_validation = report_service.format_display_date(
+                factory_settings.get('lastValidationDate') or report_data.get('lastValidationDate') or 'N/A'
+            ) or 'N/A'
+            next_validation = report_service.format_display_date(
+                factory_settings.get('nextValidationDate') or report_data.get('nextValidationDate') or 'N/A'
+            ) or 'N/A'
             is_validation = report_data.get('type') == 'validation'
 
             if is_validation:

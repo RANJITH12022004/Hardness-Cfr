@@ -26,12 +26,12 @@ def _parse_date(date_str) -> Optional[datetime]:
 
 
 def _compute_next_validation_date(last_date_str: str) -> str:
-    """Compute next validation date (last + 1 year). Returns DD-MM-YYYY or ''."""
+    """Compute next validation date (last + 1 year). Returns DD/MM/YYYY or ''."""
     d = _parse_date(last_date_str)
     if d is None:
         return ""
     d = d.replace(year=d.year + 1)
-    return d.strftime("%d-%m-%Y")
+    return d.strftime("%d/%m/%Y")
 
 
 def get_report_context(storage_dir: Path) -> dict:
@@ -85,7 +85,7 @@ def get_report_context(storage_dir: Path) -> dict:
                 if created_at:
                     d = _parse_date(created_at)
                     if d is not None:
-                        result["lastValidationDate"] = d.strftime("%d-%m-%Y")
+                        result["lastValidationDate"] = d.strftime("%d/%m/%Y")
                         result["nextValidationDate"] = _compute_next_validation_date(
                             created_at
                         )
