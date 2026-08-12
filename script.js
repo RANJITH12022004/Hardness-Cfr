@@ -3690,11 +3690,11 @@ function updateDateTime() {
     const seconds = now.getSeconds();
     const timeString = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 
-    // Format date (dd:mm:yyyy)
+    // Format date (dd/mm/yyyy)
     const day = now.getDate().toString().padStart(2, '0');
     const month = (now.getMonth() + 1).toString().padStart(2, '0');
     const year = now.getFullYear();
-    const dateString = `${day}:${month}:${year}`;
+    const dateString = `${day}/${month}/${year}`;
 
     // Update DOM elements
     const timeElement = document.getElementById('current-time');
