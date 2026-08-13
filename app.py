@@ -336,12 +336,104 @@ def _wrong_password_audit_details(member, username, attempt, maximum):
 POWER_INTERRUPTION_REMARKS = "power interruption"
 
 
-def _apply_power_loss_abort_to_report(report: dict) -> dict:
+def _parse_report_dt(raw):
+    """Parse ISO-ish timestamps from reports/checkpoints into datetime (best-effort)."""
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _format_duration_hms(seconds) -> str:
+    try:
+        total = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return "00:00:00"
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return "{:02d}:{:02d}:{:02d}".format(h, m, s)
+
+
+def _power_loss_end_iso(checkpoint: dict = None, report: dict = None) -> str:
+    """Last known live test time: checkpoint stamp beats post-boot wall clock."""
+    cp = checkpoint if isinstance(checkpoint, dict) else {}
+    rp = report if isinstance(report, dict) else {}
+    td = rp.get("testData") if isinstance(rp.get("testData"), dict) else {}
+    for raw in (
+        cp.get("_checkpointAt"),
+        cp.get("_espCommandSentAt"),
+        td.get("testEndTime"),
+        rp.get("testEndTime"),
+        rp.get("completedAt"),
+    ):
+        if raw:
+            return str(raw).strip()
+    return _utc_now_iso()
+
+
+def _apply_power_loss_duration(report: dict, checkpoint: dict = None) -> dict:
+    """Stamp exact duration of the test that ran before power loss onto the report."""
+    report = dict(report or {})
+    td = report.get("testData")
+    td = dict(td) if isinstance(td, dict) else {}
+    cp = checkpoint if isinstance(checkpoint, dict) else {}
+    cp_td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+
+    start_raw = (
+        td.get("testStartTime")
+        or report.get("testStartTime")
+        or cp.get("testStartTime")
+        or cp_td.get("testStartTime")
+    )
+    end_raw = _power_loss_end_iso(cp, report)
+    start_dt = _parse_report_dt(start_raw)
+    end_dt = _parse_report_dt(end_raw)
+    duration = None
+    if start_dt is not None and end_dt is not None:
+        if start_dt.tzinfo and not end_dt.tzinfo:
+            end_dt = end_dt.replace(tzinfo=start_dt.tzinfo)
+        elif end_dt.tzinfo and not start_dt.tzinfo:
+            start_dt = start_dt.replace(tzinfo=end_dt.tzinfo)
+        duration = max(0, int((end_dt - start_dt).total_seconds()))
+    else:
+        for candidate in (td.get("durationSeconds"), report.get("durationSeconds"), cp.get("durationSeconds"), cp_td.get("durationSeconds")):
+            if candidate is None:
+                continue
+            try:
+                duration = max(0, int(candidate))
+                break
+            except (TypeError, ValueError):
+                continue
+
+    if start_raw:
+        start_iso = str(start_raw).strip()
+        td["testStartTime"] = start_iso
+        report["testStartTime"] = start_iso
+    end_iso = str(end_raw).strip() if end_raw else _utc_now_iso()
+    td["testEndTime"] = end_iso
+    report["testEndTime"] = end_iso
+    if duration is not None:
+        td["durationSeconds"] = duration
+        report["durationSeconds"] = duration
+    report["testData"] = td
+    return report
+
+
+def _apply_power_loss_abort_to_report(report: dict, checkpoint: dict = None) -> dict:
     """Mark a report aborted after power loss with mandatory power-interruption remarks.
 
     No Pass/Fail is assigned — approval UI is not used for power-loss recovery.
     """
-    report = dict(report or {})
+    report = _apply_power_loss_duration(dict(report or {}), checkpoint)
     td = report.get("testData")
     if not isinstance(td, dict):
         td = {}
@@ -394,13 +486,13 @@ def _apply_power_loss_abort_to_report(report: dict) -> dict:
             val_runs_top[idx] = run
         report["validationRuns"] = val_runs_top
     if not report.get("completedAt"):
-        report["completedAt"] = _utc_now_iso()
+        report["completedAt"] = report.get("testEndTime") or _utc_now_iso()
     return report
 
 
-def _persist_power_loss_aborted_report(report: dict) -> dict:
+def _persist_power_loss_aborted_report(report: dict, checkpoint: dict = None) -> dict:
     """Save power-loss aborted report and write print artifacts (no Pass/Fail)."""
-    report = _apply_power_loss_abort_to_report(report)
+    report = _apply_power_loss_abort_to_report(report, checkpoint)
     report_id = report.get("id")
     if report_id is None:
         report_id = data_service.save_report(report)
@@ -419,7 +511,7 @@ def _persist_power_loss_aborted_report(report: dict) -> dict:
 
 
 def _audit_power_loss_aborted_report(report: dict) -> None:
-    """Audit row for a report saved as power-loss aborted.
+    """Audit: power interruption report saved (with exact duration) + report aborted.
 
     Always attribute to the system actor (not the still-loaded session user) so
     factory-session rows are not silently dropped by audit suppression.
@@ -428,15 +520,26 @@ def _audit_power_loss_aborted_report(report: dict) -> None:
     if rid is None:
         return
     ctx = _format_report_audit_details(int(rid), report)
-    pl_detail = "{} | unclean shutdown | status: aborted | remarks: {} | approved by System (power interruption)".format(
-        ctx,
-        POWER_INTERRUPTION_REMARKS,
-    )
+    td = report.get("testData") if isinstance(report.get("testData"), dict) else {}
+    duration = td.get("durationSeconds")
+    if duration is None:
+        duration = report.get("durationSeconds")
+    try:
+        duration_i = int(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration_i = None
+    dur_txt = _format_duration_hms(duration_i) if duration_i is not None else "--"
+    start_txt = td.get("testStartTime") or report.get("testStartTime") or "--"
+    end_txt = td.get("testEndTime") or report.get("testEndTime") or "--"
+    pl_detail = (
+        "Power interruption report saved | {} | duration: {} | "
+        "start: {} | end: {} | unclean shutdown | status: aborted | remarks: {} | "
+        "approved by System (power interruption)"
+    ).format(ctx, dur_txt, start_txt, end_txt, POWER_INTERRUPTION_REMARKS)
     audit_time = _audit_time_fields()
-    audit_service.log_structured_event(
+    common = dict(
         user="--",
         role="--",
-        action="Report aborted (power loss)",
         details=pl_detail,
         event_type="compliance",
         entity_type="report",
@@ -449,8 +552,12 @@ def _audit_power_loss_aborted_report(report: dict) -> None:
         extra={
             "reportApprovalStatus": "aborted",
             "approvedBy": "System (power interruption)",
+            "durationSeconds": duration_i,
+            "durationHms": dur_txt,
         },
     )
+    audit_service.log_structured_event(action="Power interruption", **common)
+    audit_service.log_structured_event(action="Report aborted (power loss)", **common)
 
 
 def _checkpoint_is_mid_test(cp) -> bool:
@@ -469,7 +576,204 @@ def _checkpoint_is_mid_test(cp) -> bool:
     return bool(cp.get("productName") or cp.get("recipeId") or cp.get("recipe"))
 
 
-def _abort_pending_reports_after_power_loss(session_username=None):
+def _checkpoint_operator_user(cp) -> dict:
+    """Best-effort operator identity from a mid-test checkpoint for power-loss logout."""
+    if not isinstance(cp, dict):
+        return {}
+    td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    username = (
+        cp.get("operatedByUsername")
+        or td.get("operatedByUsername")
+        or cp.get("employeeId")
+        or td.get("employeeId")
+        or cp.get("username")
+        or ""
+    )
+    name = cp.get("operatedBy") or td.get("operatedBy") or username
+    role = cp.get("operatedByRole") or td.get("operatedByRole") or cp.get("role") or ""
+    out = {
+        "username": str(username or "").strip(),
+        "name": str(name or "").strip(),
+        "role": str(role or "").strip(),
+    }
+    return out if out.get("username") or out.get("name") else {}
+
+
+def _audit_test_started_from_checkpoint(cp) -> None:
+    """Ensure a Test started audit exists for a power-loss mid-test recovery."""
+    if not isinstance(cp, dict) or not cp:
+        return
+    if cp.get("_testStartedAudited"):
+        return
+    rtype = str(cp.get("type") or "test").strip().lower()
+    action = "Quick test started" if cp.get("isQuickTest") or (isinstance(cp.get("testData"), dict) and cp.get("testData").get("isQuickTest")) else "Test started"
+    if rtype == "validation":
+        action = "Validation started"
+    elif rtype == "calibration":
+        action = "Calibration started"
+    product = cp.get("productName") or (cp.get("recipe") or {}).get("productName") or ""
+    batch = cp.get("batchNumber") or (cp.get("recipe") or {}).get("batchNumber") or ""
+    details_parts = [p for p in (product, batch) if p]
+    details = ", ".join(details_parts) if details_parts else "Test run in progress"
+    start = cp.get("testStartTime") or ((cp.get("testData") or {}) if isinstance(cp.get("testData"), dict) else {}).get("testStartTime")
+    if start:
+        details = "{} | start: {}".format(details, start)
+    op = _checkpoint_operator_user(cp)
+    audit_time = _audit_time_fields()
+    # Use real operator when known; otherwise system actor (still visible).
+    user = op.get("username") or op.get("name") or "--"
+    role = op.get("role") or "--"
+    if audit_service.is_hidden_factory_actor(user, role):
+        user, role = "--", "--"
+    audit_service.log_structured_event(
+        user=user,
+        role=role,
+        action=action,
+        details=details,
+        event_type="lifecycle",
+        entity_type="test" if rtype == "test" else rtype,
+        entity_name=product or "test",
+        outcome="success",
+        request_source="system/startup",
+        timestamp_ms=audit_time.get("timestamp_ms"),
+        date_time=audit_time.get("date_time"),
+        extra={"recoveredAfterPowerLoss": True, "testStartTime": start} if start else {"recoveredAfterPowerLoss": True},
+    )
+
+
+def _audit_power_interruption_logout(user_info: dict, request_source: str = "system/startup") -> None:
+    """Audit: user logged out due to power interruption."""
+    user_info = user_info if isinstance(user_info, dict) else {}
+    un = (user_info.get("username") or user_info.get("name") or "").strip()
+    role = (user_info.get("role") or "").strip()
+    audit_time = _audit_time_fields()
+    if audit_service.is_hidden_factory_actor(un, role):
+        details = "Privileged factory session was active when power was interrupted or the system restarted."
+        actor_user, actor_role = "--", "--"
+    elif un:
+        details = "User logged out due to {}: {}".format(POWER_INTERRUPTION_REMARKS, un)
+        actor_user, actor_role = un, (role or "--")
+        if audit_service.is_hidden_factory_actor(actor_user, actor_role):
+            actor_user, actor_role = "--", "--"
+    else:
+        details = "User logged out due to {}".format(POWER_INTERRUPTION_REMARKS)
+        actor_user, actor_role = "--", "--"
+    audit_service.log_structured_event(
+        user=actor_user,
+        role=actor_role,
+        action="Power interruption logout",
+        outcome="success",
+        entity_type="session",
+        entity_name="logout",
+        details=details,
+        event_type="compliance",
+        reason=POWER_INTERRUPTION_REMARKS,
+        target_user=un or None,
+        extra={"lastKnownRole": role} if role else None,
+        request_source=request_source,
+        timestamp_ms=audit_time.get("timestamp_ms"),
+        date_time=audit_time.get("date_time"),
+    )
+    try:
+        key = (un or "--").strip().lower()
+        last_map = getattr(app, "_last_power_interrupt_logout_ms", None)
+        if not isinstance(last_map, dict):
+            last_map = {}
+        last_map[key] = int(time.time() * 1000)
+        app._last_power_interrupt_logout_ms = last_map
+    except Exception:
+        pass
+
+
+def _mark_checkpoint_esp_command(command_label: str) -> None:
+    """Once START checkpoint exists, any ESP measure/backoff command commits the run as started."""
+    try:
+        cp = data_service.get_test_run_data()
+        if not isinstance(cp, dict) or not cp:
+            return
+        if not _checkpoint_is_mid_test(cp):
+            return
+        now_iso = _utc_now_iso()
+        changed = False
+        if not cp.get("testStartTime"):
+            cp["testStartTime"] = now_iso
+            td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+            td = dict(td)
+            td.setdefault("testStartTime", now_iso)
+            cp["testData"] = td
+            changed = True
+        if not cp.get("_espCommandSentAt"):
+            cp["_espCommandSentAt"] = now_iso
+            cp["_espCommand"] = str(command_label or "")[:32]
+            changed = True
+        if str(cp.get("_checkpointPhase") or "").strip().lower() != "running":
+            if str(cp.get("_checkpointPhase") or "").strip().lower() != "awaiting-approval":
+                cp["_checkpointPhase"] = "running"
+                changed = True
+        cp["_checkpointAt"] = now_iso
+        if changed or True:
+            # Always refresh checkpoint time while ESP is actively commanded.
+            data_service.save_test_run_data(cp)
+    except Exception:
+        app.logger.exception("Failed to mark ESP command on test checkpoint")
+
+
+def _audit_test_started_on_checkpoint_save(body: dict) -> dict:
+    """On first running checkpoint after START, persist Test started audit immediately."""
+    body = dict(body or {})
+    phase = str(body.get("_checkpointPhase") or "").strip().lower()
+    if phase not in ("running", "awaiting-approval"):
+        return body
+    if body.get("_testStartedAudited"):
+        return body
+    prev = data_service.get_test_run_data()
+    if isinstance(prev, dict) and prev.get("_testStartedAudited"):
+        body["_testStartedAudited"] = True
+        return body
+    # Ensure start timestamp exists at the moment START is committed.
+    if not body.get("testStartTime"):
+        body["testStartTime"] = _utc_now_iso()
+    td = body.get("testData") if isinstance(body.get("testData"), dict) else {}
+    td = dict(td)
+    td.setdefault("testStartTime", body.get("testStartTime"))
+    body["testData"] = td
+    rtype = str(body.get("type") or "test").strip().lower()
+    action = "Quick test started" if body.get("isQuickTest") or td.get("isQuickTest") else "Test started"
+    if rtype == "validation":
+        action = "Validation started"
+    product = body.get("productName") or (body.get("recipe") or {}).get("productName") or ""
+    batch = body.get("batchNumber") or (body.get("recipe") or {}).get("batchNumber") or ""
+    details_parts = [p for p in (product, batch) if p]
+    details = ", ".join(details_parts) if details_parts else "Test run started"
+    details = "{} | start: {}".format(details, body.get("testStartTime"))
+    try:
+        actor = _audit_actor()
+    except Exception:
+        cur = data_service.get_current_user() or {}
+        actor = {
+            "user": cur.get("username") or cur.get("name") or "--",
+            "role": cur.get("role") or "--",
+        }
+    audit_time = _audit_time_fields()
+    audit_service.log_structured_event(
+        user=actor.get("user"),
+        role=actor.get("role"),
+        action=action,
+        details=details,
+        event_type="lifecycle",
+        entity_type="test" if rtype == "test" else rtype,
+        entity_name=product or "test",
+        outcome="success",
+        request_source="PUT /api/data/test-run/checkpoint",
+        timestamp_ms=audit_time.get("timestamp_ms"),
+        date_time=audit_time.get("date_time"),
+        extra={"testStartTime": body.get("testStartTime")},
+    )
+    body["_testStartedAudited"] = True
+    return body
+
+
+def _abort_pending_reports_after_power_loss(session_username=None, checkpoint: dict = None):
     """Mark pending test/validation reports as aborted after unclean shutdown (power loss).
 
     No Pass/Fail is requested — remarks are set to power interruption.
@@ -482,7 +786,7 @@ def _abort_pending_reports_after_power_loss(session_username=None):
             continue
         if (report.get("reportApprovalStatus") or "").strip().lower() != "pending":
             continue
-        report = _persist_power_loss_aborted_report(report)
+        report = _persist_power_loss_aborted_report(report, checkpoint)
         _audit_power_loss_aborted_report(report)
         aborted += 1
     return aborted
@@ -502,7 +806,7 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username=None):
         except Exception:
             existing = None
         if existing and str(existing.get("reportApprovalStatus") or "").strip().lower() == "pending":
-            report = _persist_power_loss_aborted_report(existing)
+            report = _persist_power_loss_aborted_report(existing, cp)
             _audit_power_loss_aborted_report(report)
             data_service.clear_test_run_data()
             return 1
@@ -515,7 +819,8 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username=None):
         return 0
     td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
     report_data = dict(cp)
-    for k in ("_checkpointAt", "_checkpointPhase", "_pendingReportId"):
+    # Keep timing fields for duration; strip internal markers only.
+    for k in ("_checkpointAt", "_checkpointPhase", "_pendingReportId", "_testStartedAudited", "_espCommandSentAt", "_espCommand"):
         report_data.pop(k, None)
     recipe = report_data.get("recipe") or (td.get("recipe") if isinstance(td, dict) else None)
     enriched = report_service.generate_report(
@@ -524,7 +829,7 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username=None):
         factory_settings=report_data.get("factorySettings"),
     )
     enriched = _stamp_report_operator(enriched)
-    enriched = _persist_power_loss_aborted_report(enriched)
+    enriched = _persist_power_loss_aborted_report(enriched, cp)
     _audit_power_loss_aborted_report(enriched)
     data_service.clear_test_run_data()
     return 1
@@ -563,49 +868,33 @@ def _startup_session_power_audit():
                 pass
 
         if should_recover_reports:
-            un = ((pending or {}).get("username") or "").strip()
+            # 1) Test started (if START had committed a checkpoint but audit never flushed)
+            if mid_test:
+                try:
+                    _audit_test_started_from_checkpoint(checkpoint)
+                except Exception:
+                    app.logger.exception("Test started recovery audit failed")
+            # 2) Power interruption report saved (with exact duration)
             try:
-                _abort_pending_reports_after_power_loss(None)
+                _abort_pending_reports_after_power_loss(None, checkpoint if mid_test else None)
                 _create_aborted_report_from_power_loss_checkpoint(None)
             except Exception:
                 app.logger.exception("Abort pending reports after power loss failed")
-            if pending and not pending.get("powerAuditLogged"):
-                role = (pending.get("role") or "").strip()
-                audit_time = _audit_time_fields()
-                if audit_service.is_hidden_factory_actor(un, role):
-                    pi_details = "Privileged factory session was active when power was interrupted or the system restarted."
-                elif un:
-                    pi_details = "Unclean shutdown while {} was logged in".format(un)
-                else:
-                    pi_details = "Unclean shutdown during active session"
-                audit_service.log_structured_event(
-                    user="--",
-                    role="--",
-                    action="Power interruption logout",
-                    outcome="success",
-                    entity_type="session",
-                    entity_name="power",
-                    details=pi_details,
-                    event_type="compliance",
-                    target_user=un,
-                    extra={"lastKnownRole": role} if role else None,
-                    request_source="system/startup",
-                    timestamp_ms=audit_time.get("timestamp_ms"),
-                    date_time=audit_time.get("date_time"),
-                )
-                # Seed debounce so a near-simultaneous session-ui-reset does not double-log.
+            # 3) User logged out due to power interruption
+            logout_user = None
+            if pending and (pending.get("username") or pending.get("name")):
+                logout_user = pending
+            else:
+                logout_user = _checkpoint_operator_user(checkpoint) or data_service.get_current_user()
+            if logout_user and not (isinstance(pending, dict) and pending.get("powerAuditLogged")):
                 try:
-                    key = (un or "--").strip().lower()
-                    last_map = getattr(app, "_last_power_interrupt_logout_ms", None)
-                    if not isinstance(last_map, dict):
-                        last_map = {}
-                    last_map[key] = int(time.time() * 1000)
-                    app._last_power_interrupt_logout_ms = last_map
+                    _audit_power_interruption_logout(logout_user)
                 except Exception:
-                    pass
-                pending = dict(pending)
-                pending["powerAuditLogged"] = True
-                data_service.write_session_power_audit_pending(pending)
+                    app.logger.exception("Power interruption logout audit failed")
+                if pending:
+                    pending = dict(pending)
+                    pending["powerAuditLogged"] = True
+                    data_service.write_session_power_audit_pending(pending)
         elif pending and had_clean_shutdown and pending.get("powerAuditLogged"):
             pending = dict(pending)
             pending.pop("powerAuditLogged", None)
@@ -1707,8 +1996,10 @@ def put_test_run_checkpoint():
         body = request.get_json(force=True, silent=True) or {}
         if not body:
             return jsonify({"ok": False, "error": "Checkpoint body required"}), 400
+        # START (or first post-START update) commits the run as started for power-loss recovery.
+        body = _audit_test_started_on_checkpoint_save(body)
         data_service.save_test_run_data(body)
-        return jsonify({"ok": True}), 200
+        return jsonify({"ok": True, "testStartedAudited": bool(body.get("_testStartedAudited"))}), 200
     except Exception as e:
         app.logger.exception("Error saving test run checkpoint")
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -5084,6 +5375,7 @@ def test_dimension():
     )
     if not result.get("ok"):
         return jsonify(result), 503
+    _mark_checkpoint_esp_command("T,DIM")
     return jsonify(result)
 
 
@@ -5100,6 +5392,7 @@ def test_hardness():
     )
     if not result.get("ok"):
         return jsonify(result), 503
+    _mark_checkpoint_esp_command("T,HARD")
     return jsonify(result)
 
 
@@ -5128,6 +5421,9 @@ def test_backoff():
         mm = 2.0
     cmd = "T,BO,{}*".format(mm)
     result = hardware_service.send_command(cmd, timeout=None if no_timeout else hardware_service.COMMAND_TIMEOUT)
+    if result.get("ok"):
+        # Only stamps when a START checkpoint is already active (prep BO before START is ignored).
+        _mark_checkpoint_esp_command("T,BO")
     return jsonify(result)
 
 

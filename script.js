@@ -4570,6 +4570,13 @@ function putHardnessTestRunCheckpoint(phase, extra) {
         var sampleSize = maxMeasLen > 0
             ? maxMeasLen
             : (parseInt(r.sampleSize, 10) || 0);
+        var startIso = (typeof testRunStartTime !== 'undefined' && testRunStartTime)
+            ? new Date(testRunStartTime).toISOString()
+            : undefined;
+        var nowIso = new Date().toISOString();
+        var durationSeconds = (typeof testRunStartTime !== 'undefined' && testRunStartTime)
+            ? Math.max(0, Math.floor((Date.now() - testRunStartTime) / 1000))
+            : undefined;
         var payload = Object.assign({
             type: 'test',
             name: (r.productName || r.name || 'Test') + ' - ' + (r.batchNumber || r.batch || 'N/A'),
@@ -4591,9 +4598,9 @@ function putHardnessTestRunCheckpoint(phase, extra) {
             statistics: stats,
             status: (phase === 'awaiting-approval') ? 'pending' : 'running',
             isQuickTest: (typeof currentTest !== 'undefined' && currentTest === 'quick'),
-            testStartTime: (typeof testRunStartTime !== 'undefined' && testRunStartTime)
-                ? new Date(testRunStartTime).toISOString()
-                : undefined,
+            testStartTime: startIso,
+            testEndTime: nowIso,
+            durationSeconds: durationSeconds,
             testData: {
                 status: (phase === 'awaiting-approval') ? 'pending' : 'running',
                 measurements: meas,
@@ -4610,9 +4617,12 @@ function putHardnessTestRunCheckpoint(phase, extra) {
                 weightUnit: r.weightUnit,
                 mode: r.mode || 'auto',
                 recipe: r,
-                isQuickTest: (typeof currentTest !== 'undefined' && currentTest === 'quick')
+                isQuickTest: (typeof currentTest !== 'undefined' && currentTest === 'quick'),
+                testStartTime: startIso,
+                testEndTime: nowIso,
+                durationSeconds: durationSeconds
             },
-            _checkpointAt: new Date().toISOString(),
+            _checkpointAt: nowIso,
             _checkpointPhase: phase || 'running'
         }, extra || {});
         if (typeof stampOperatorOnTestReportPayload === 'function') {
@@ -5117,7 +5127,8 @@ async function runHardnessTestLoop() {
     };
 
     testRunTotalSamples = effectiveMaxSample;
-    testRunStartTime = Date.now();
+    // START already stamps testRunStartTime; only set here if somehow missing.
+    if (!testRunStartTime) testRunStartTime = Date.now();
     var firstEspCommandDone = false;
     var samplesAttempted = 0;
 
@@ -5413,16 +5424,24 @@ function toggleTestRunState() {
         btnAction.innerHTML = '<div class="ctrl-icon">🛑</div><span>STOP</span>';
 
         testRunActive = true;
+        // Commit start time immediately — any power cut after START is a power failure.
+        testRunStartTime = Date.now();
         lockNavigation();
-        if (typeof putHardnessTestRunCheckpoint === 'function') {
-            putHardnessTestRunCheckpoint('running');
-        }
         testRunPaused = false;
         testRunAborted = false;
         userAbortReportHandled = false;
         backoffAbortHandled = false;
         resetTestRunReportSaveGate();
-        runHardnessTestLoop();
+
+        // Persist checkpoint first (server writes durable Test started audit), then run ESP loop.
+        var startCheckpoint = (typeof putHardnessTestRunCheckpoint === 'function')
+            ? putHardnessTestRunCheckpoint('running')
+            : Promise.resolve(null);
+        Promise.resolve(startCheckpoint).then(function () {
+            runHardnessTestLoop();
+        }).catch(function () {
+            runHardnessTestLoop();
+        });
         console.log("Test Started");
     } else {
         // Abort requested - Show Custom UI Modal
