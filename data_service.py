@@ -139,6 +139,16 @@ def init(config):
                 _sync_factory_settings_storage()
             except OSError as e2:
                 _log.error("factory settings sync still failing after repair: %s", e2)
+    try:
+        _sync_members_storage()
+    except OSError as e:
+        _log.error("members sync failed (storage may be read-only): %s", e)
+        if _is_erofs(e):
+            _try_repair_storage_once()
+            try:
+                _sync_members_storage()
+            except OSError as e2:
+                _log.error("members sync still failing after repair: %s", e2)
 
 
 def _is_erofs(err: BaseException) -> bool:
@@ -334,28 +344,42 @@ _LOAD_JSON_USE_LIST_DEFAULT = object()
 def _load_json_file(filepath: pathlib.Path, default=_LOAD_JSON_USE_LIST_DEFAULT):
     if default is _LOAD_JSON_USE_LIST_DEFAULT:
         default = []
-    if not filepath.exists():
-        return default
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    bak = filepath.with_suffix(filepath.suffix + ".bak")
+
+    def _try_read(path: pathlib.Path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return True, json.load(f)
+        except Exception:
+            return False, None
+
+    if filepath.exists():
+        ok, data = _try_read(filepath)
+        if ok:
             return data if data is not None else default
-    except Exception:
-        # Recover from a previous atomic write if the main file was truncated mid-write (VFAT).
-        bak = filepath.with_suffix(filepath.suffix + ".bak")
+        # Main exists but unreadable/truncated — fall back to .bak (VFAT mid-write).
         if bak.exists():
+            bak_ok, bak_data = _try_read(bak)
+            if bak_ok and bak_data is not None:
+                try:
+                    _save_json_file(filepath, bak_data)
+                except Exception:
+                    pass
+                return bak_data
+        return default
+
+    # Main missing (power loss between rename steps) — recover from .bak when present.
+    if bak.exists():
+        bak_ok, bak_data = _try_read(bak)
+        if bak_ok and bak_data is not None:
             try:
-                with open(bak, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if data is not None:
-                        try:
-                            _save_json_file(filepath, data)
-                        except Exception:
-                            pass
-                        return data
+                _save_json_file(filepath, bak_data)
             except Exception:
                 pass
-        return default
+            return bak_data
+        if bak_ok:
+            return default
+    return default
 
 
 def _json_write_lock_for(filepath: pathlib.Path) -> threading.Lock:
@@ -711,10 +735,140 @@ def delete_report(report_id: int) -> bool:
 # =================== MEMBER OPERATIONS ==========================
 
 
+def _members_mirror_path() -> pathlib.Path:
+    return _app_root_storage_dir() / "members.json"
+
+
+def _members_list_is_valuable(members) -> bool:
+    """True when a members payload looks like real user data (not wiped/corrupt)."""
+    if not isinstance(members, list) or not members:
+        return False
+    for m in members:
+        if not isinstance(m, dict):
+            continue
+        un = str(m.get("username") or "").strip()
+        if un and un.upper() != FACTORY_USERNAME.upper():
+            return True
+    return False
+
+
+def _read_members_candidate(path: pathlib.Path):
+    if not path or not path.exists():
+        return None
+    data = _load_json_file(path, default=None)
+    if isinstance(data, list):
+        return data
+    return None
+
+
+def _best_members_candidate(*candidates):
+    """Pick the richest non-empty members list among candidates (USB / bak / SD mirror)."""
+    best = None
+    best_n = -1
+    for data in candidates:
+        if not _members_list_is_valuable(data):
+            continue
+        n = sum(
+            1
+            for m in data
+            if isinstance(m, dict)
+            and str(m.get("username") or "").strip().upper() != FACTORY_USERNAME.upper()
+        )
+        if n > best_n:
+            best = data
+            best_n = n
+    return best if best is not None else []
+
+
+def _sync_members_storage() -> None:
+    """
+    Keep members.json consistent on internal USB and APP_ROOT/storage.
+
+    After VFAT power-loss, the USB copy can become 0 bytes while a bak or SD
+    mirror still holds users — recover the valuable copy and re-mirror both.
+    """
+    canonical = _get_storage_path("members.json")
+    mirror = _members_mirror_path()
+    bak = canonical.with_suffix(canonical.suffix + ".bak")
+    try:
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+    canon_data = _read_members_candidate(canonical)
+    bak_data = _read_members_candidate(bak)
+    mirror_data = _read_members_candidate(mirror)
+    best = _best_members_candidate(canon_data, bak_data, mirror_data)
+    if not _members_list_is_valuable(best):
+        return
+
+    # Always rewrite both sides when recovery found a better list than the live file.
+    if not _members_list_is_valuable(canon_data) or best is not canon_data:
+        _save_json_file(canonical, best)
+    if mirror.resolve() != canonical.resolve():
+        if not _members_list_is_valuable(mirror_data) or best is not mirror_data:
+            try:
+                _save_json_file(mirror, best)
+            except OSError as e:
+                _log.error("members mirror write failed: %s", e)
+
+
+def _load_members_raw() -> List[Dict[str, Any]]:
+    """Load members with bak/mirror recovery if the USB file was wiped empty."""
+    canonical = _get_storage_path("members.json")
+    mirror = _members_mirror_path()
+    bak = canonical.with_suffix(canonical.suffix + ".bak")
+    canon_data = _read_members_candidate(canonical)
+    if _members_list_is_valuable(canon_data):
+        return list(canon_data)
+    best = _best_members_candidate(
+        canon_data,
+        _read_members_candidate(bak),
+        _read_members_candidate(mirror),
+    )
+    if _members_list_is_valuable(best):
+        try:
+            _save_json_file(canonical, best)
+            if mirror.resolve() != canonical.resolve():
+                _save_json_file(mirror, best)
+        except OSError as e:
+            _log.error("members auto-recover write failed: %s", e)
+        return list(best)
+    return list(canon_data) if isinstance(canon_data, list) else []
+
+
+def _save_members_raw(members: List[Dict[str, Any]], allow_empty: bool = False) -> None:
+    """Persist members to USB + SD mirror; refuse accidental empty wipe after power-loss."""
+    if not isinstance(members, list):
+        members = []
+    members_path = _get_storage_path("members.json")
+    mirror = _members_mirror_path()
+    if (not allow_empty) and (not _members_list_is_valuable(members)):
+        existing = _load_members_raw()
+        if _members_list_is_valuable(existing):
+            _log.error(
+                "refusing to overwrite members.json with empty/invalid list "
+                "(keeping %s existing users)",
+                sum(
+                    1
+                    for m in existing
+                    if isinstance(m, dict)
+                    and str(m.get("username") or "").strip().upper() != FACTORY_USERNAME.upper()
+                ),
+            )
+            return
+    _save_members_raw(members)
+    if mirror.resolve() != members_path.resolve():
+        try:
+            mirror.parent.mkdir(parents=True, exist_ok=True)
+            _save_json_file(mirror, members)
+        except OSError as e:
+            _log.error("members mirror write failed: %s", e)
+
+
 def list_members():
     """List all members. Excludes hidden factory user. Normalizes status/failedAttempts."""
-    members_path = _get_storage_path("members.json")
-    members = _load_json_file(members_path, default=[])
+    members = _load_members_raw()
     if not isinstance(members, list):
         members = []
 
@@ -1046,7 +1200,7 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
     if username == FACTORY_USERNAME.upper():
         raise ValueError("The factory user cannot be created or modified.")
     members_path = _get_storage_path("members.json")
-    members = _load_json_file(members_path, default=[])
+    members = _load_members_raw()
     if not isinstance(members, list):
         members = []
     key_new = _member_username_key(member_data)
@@ -1110,7 +1264,7 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
             if m.get("id") == member_id:
                 members[i] = member_data
                 break
-        _save_json_file(members_path, members)
+        _save_members_raw(members)
         return member_id
 
     for m in members:
@@ -1142,14 +1296,14 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
     _normalize_member_feature_overrides(member_data)
     _normalize_member_password_fields(member_data)
     members.append(member_data)
-    _save_json_file(members_path, members)
+    _save_members_raw(members)
     return member_id
 
 
 def delete_member(member_id: int) -> bool:
     """Delete member by ID. Cannot delete factory user."""
     members_path = _get_storage_path("members.json")
-    members = _load_json_file(members_path, default=[])
+    members = _load_members_raw()
     if not isinstance(members, list):
         members = []
     member_to_delete = next((m for m in members if m.get("id") == member_id), None)
@@ -1158,7 +1312,7 @@ def delete_member(member_id: int) -> bool:
     original_len = len(members)
     members = [m for m in members if m.get("id") != member_id]
     if len(members) < original_len:
-        _save_json_file(members_path, members)
+        _save_members_raw(members)
         return True
     return False
 
@@ -1206,7 +1360,7 @@ def get_member_by_username(username: str) -> Optional[Dict[str, Any]]:
         return None
     username_lower = username_clean.lower()
     members_path = _get_storage_path("members.json")
-    members = _load_json_file(members_path, default=[])
+    members = _load_members_raw()
     if not isinstance(members, list):
         members = []
     for m in members:
@@ -1272,7 +1426,7 @@ def get_next_fingerprint_template_id(max_templates: int = 1000) -> int:
 def _save_member_record(updated: Dict[str, Any]) -> None:
     """Internal helper to persist a single member record by id."""
     members_path = _get_storage_path("members.json")
-    members = _load_json_file(members_path, default=[])
+    members = _load_members_raw()
     if not isinstance(members, list):
         members = []
     _normalize_member_password_fields(updated)
@@ -1285,7 +1439,7 @@ def _save_member_record(updated: Dict[str, Any]) -> None:
             break
     if not replaced:
         members.append(updated)
-    _save_json_file(members_path, members)
+    _save_members_raw(members)
 
 
 def set_member_password(member_id: int, new_password: str, changed_at: Optional[str] = None) -> Dict[str, Any]:
@@ -1381,13 +1535,13 @@ def factory_reset() -> Dict[str, Any]:
     test_run_path = _get_storage_path("test_run.json")
     recipes = _load_json_file(recipes_path, default=[])
     reports = _load_json_file(reports_path, default=[])
-    members = _load_json_file(members_path, default=[])
+    members = _load_members_raw()
     n_recipes = len(recipes) if isinstance(recipes, list) else 0
     n_reports = len(reports) if isinstance(reports, list) else 0
     n_members = len(members) if isinstance(members, list) else 0
     _save_json_file(recipes_path, [])
     _save_json_file(reports_path, [])
-    _save_json_file(members_path, [])
+    _save_members_raw([], allow_empty=True)
     n_report_files = 0
     if _reports_dir and _reports_dir.exists():
         for f in list(_reports_dir.iterdir()):
@@ -1559,13 +1713,25 @@ _APP_CLEAN_STOP_FLAG = "app_clean_stop.flag"
 
 
 def write_session_power_audit_pending(user: Dict[str, Any]):
-    """Mark an open logged-in session for unclean-shutdown detection on next process start."""
+    """Mark an open logged-in session for unclean-shutdown detection on next process start.
+
+    Also clears any leftover clean-stop flag from a prior logout/restart so a new
+    login starts an unclean-detectable session (otherwise a later power cut would
+    be misclassified as a clean stop).
+    """
+    # New open session invalidates any prior clean-stop marker.
+    try:
+        consume_app_clean_stop_flag()
+    except Exception:
+        pass
     path = _get_storage_path(_SESSION_POWER_AUDIT_PENDING)
     payload = {
         "username": (user.get("username") or user.get("name") or "").strip(),
         "role": (user.get("role") or "").strip(),
         "ts_ms": int(datetime.now().timestamp() * 1000),
     }
+    if isinstance(user, dict) and user.get("powerAuditLogged"):
+        payload["powerAuditLogged"] = True
     _save_json_file(path, payload)
 
 

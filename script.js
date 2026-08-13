@@ -4540,13 +4540,78 @@ function clearHardnessTestRunCheckpoint() {
     Promise.resolve(req).catch(function () {});
 }
 
+function _checkpointMeasurementStats(meas) {
+    var stats = {};
+    var keys = ['Thickness', 'Diameter', 'Width', 'Length', 'Hardness', 'Weight'];
+    keys.forEach(function (key) {
+        if (meas && meas[key] && meas[key].length > 0 && typeof computeParamStatistics === 'function') {
+            stats[key] = computeParamStatistics(meas[key]);
+        }
+    });
+    return stats;
+}
+
+function _checkpointMaxMeasurementCount(meas) {
+    var maxLen = 0;
+    ['Thickness', 'Diameter', 'Width', 'Length', 'Hardness', 'Weight'].forEach(function (key) {
+        if (meas && meas[key] && meas[key].length > maxLen) maxLen = meas[key].length;
+    });
+    return maxLen;
+}
+
 function putHardnessTestRunCheckpoint(phase, extra) {
     try {
+        var r = lastTestRunRecipe || {};
+        var meas = lastTestRunMeasurements || {
+            Thickness: [], Diameter: [], Width: [], Length: [], Hardness: [], Weight: []
+        };
+        var stats = _checkpointMeasurementStats(meas);
+        var maxMeasLen = _checkpointMaxMeasurementCount(meas);
+        var sampleSize = maxMeasLen > 0
+            ? maxMeasLen
+            : (parseInt(r.sampleSize, 10) || 0);
         var payload = Object.assign({
             type: 'test',
-            productName: (lastTestRunRecipe && (lastTestRunRecipe.productName || lastTestRunRecipe.name)) || '',
-            recipeId: lastTestRunRecipe && lastTestRunRecipe.id,
-            batchNumber: lastTestRunRecipe && (lastTestRunRecipe.batchNumber || lastTestRunRecipe.batch),
+            name: (r.productName || r.name || 'Test') + ' - ' + (r.batchNumber || r.batch || 'N/A'),
+            productName: (r.productName || r.name) || '',
+            recipeId: r.id,
+            batchNumber: r.batchNumber || r.batch,
+            shape: r.shape,
+            parameters: r.parameters,
+            parameterSamples: r.parameterSamples || {},
+            parameterTolerances: r.parameterTolerances || {},
+            unit: r.unit,
+            conversionFactor: r.conversionFactor,
+            distanceUnit: r.distanceUnit,
+            weightUnit: r.weightUnit,
+            mode: r.mode || 'auto',
+            sampleSize: sampleSize,
+            recipe: r,
+            measurements: meas,
+            statistics: stats,
+            status: (phase === 'awaiting-approval') ? 'pending' : 'running',
+            isQuickTest: (typeof currentTest !== 'undefined' && currentTest === 'quick'),
+            testStartTime: (typeof testRunStartTime !== 'undefined' && testRunStartTime)
+                ? new Date(testRunStartTime).toISOString()
+                : undefined,
+            testData: {
+                status: (phase === 'awaiting-approval') ? 'pending' : 'running',
+                measurements: meas,
+                statistics: stats,
+                sampleSize: sampleSize,
+                productName: (r.productName || r.name) || '',
+                batchNumber: r.batchNumber || r.batch,
+                shape: r.shape,
+                parameters: r.parameters,
+                parameterSamples: r.parameterSamples || {},
+                parameterTolerances: r.parameterTolerances || {},
+                unit: r.unit,
+                distanceUnit: r.distanceUnit,
+                weightUnit: r.weightUnit,
+                mode: r.mode || 'auto',
+                recipe: r,
+                isQuickTest: (typeof currentTest !== 'undefined' && currentTest === 'quick')
+            },
             _checkpointAt: new Date().toISOString(),
             _checkpointPhase: phase || 'running'
         }, extra || {});
@@ -5226,6 +5291,10 @@ async function runHardnessTestLoop() {
                     await new Promise(function (r) { setTimeout(r, delayMs); });
                 }
             }
+        }
+        // Persist collected samples after each tablet so power-loss recovery keeps partial data.
+        if (typeof putHardnessTestRunCheckpoint === 'function') {
+            putHardnessTestRunCheckpoint('running');
         }
     }
 

@@ -419,16 +419,54 @@ def _persist_power_loss_aborted_report(report: dict) -> dict:
 
 
 def _audit_power_loss_aborted_report(report: dict) -> None:
-    """Audit row for a report saved as power-loss aborted."""
+    """Audit row for a report saved as power-loss aborted.
+
+    Always attribute to the system actor (not the still-loaded session user) so
+    factory-session rows are not silently dropped by audit suppression.
+    """
     rid = report.get("id")
     if rid is None:
         return
     ctx = _format_report_audit_details(int(rid), report)
-    pl_detail = "{} | unclean shutdown | status: aborted | remarks: {}".format(
+    pl_detail = "{} | unclean shutdown | status: aborted | remarks: {} | approved by System (power interruption)".format(
         ctx,
         POWER_INTERRUPTION_REMARKS,
     )
-    _audit(None, None, "Report aborted (power loss)", pl_detail)
+    audit_time = _audit_time_fields()
+    audit_service.log_structured_event(
+        user="--",
+        role="--",
+        action="Report aborted (power loss)",
+        details=pl_detail,
+        event_type="compliance",
+        entity_type="report",
+        entity_id=rid,
+        entity_name=(report.get("name") or report.get("productName") or ""),
+        outcome="success",
+        request_source="system/startup",
+        timestamp_ms=audit_time.get("timestamp_ms"),
+        date_time=audit_time.get("date_time"),
+        extra={
+            "reportApprovalStatus": "aborted",
+            "approvedBy": "System (power interruption)",
+        },
+    )
+
+
+def _checkpoint_is_mid_test(cp) -> bool:
+    """True when an in-progress / awaiting-approval checkpoint should recover on boot."""
+    if not isinstance(cp, dict) or not cp:
+        return False
+    rtype = str(cp.get("type") or "").strip().lower()
+    if rtype not in ("test", "validation", "calibration"):
+        return False
+    phase = str(cp.get("_checkpointPhase") or "").strip().lower()
+    if phase in ("running", "awaiting-approval"):
+        return True
+    # Sparse / legacy checkpoints without phase still count if they look like a run.
+    if cp.get("_pendingReportId") is not None or cp.get("measurements") or cp.get("testData"):
+        return True
+    return bool(cp.get("productName") or cp.get("recipeId") or cp.get("recipe"))
 
 
 def _abort_pending_reports_after_power_loss(session_username=None):
@@ -497,16 +535,41 @@ def _startup_session_power_audit():
     try:
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
-        if pending and not had_clean_shutdown:
-            un = (pending.get("username") or "").strip()
-            # Always recover pending test/validation reports on unclean restart,
-            # even if the power-interruption audit row was already written.
+        checkpoint = data_service.get_test_run_data()
+        mid_test = _checkpoint_is_mid_test(checkpoint)
+        # Stale clean-stop flag left after a prior logout must not block recovery when
+        # a mid-test checkpoint (or awaiting-approval report) is still on disk.
+        if had_clean_shutdown and mid_test:
+            had_clean_shutdown = False
+            app.logger.warning(
+                "Ignoring stale clean-stop flag; mid-test checkpoint present — treating as unclean shutdown"
+            )
+
+        should_recover_reports = (not had_clean_shutdown) and (
+            bool(pending) or mid_test
+        )
+        # Also abort any pending reports on unclean start even without session pending
+        # (e.g. pending file lost but reports.json still has pending approval rows).
+        if not had_clean_shutdown and not should_recover_reports:
+            try:
+                for report in data_service.list_reports("all", include_pending=True) or []:
+                    rtype = (report.get("type") or "").strip().lower()
+                    if rtype not in ("test", "validation", "calibration"):
+                        continue
+                    if (report.get("reportApprovalStatus") or "").strip().lower() == "pending":
+                        should_recover_reports = True
+                        break
+            except Exception:
+                pass
+
+        if should_recover_reports:
+            un = ((pending or {}).get("username") or "").strip()
             try:
                 _abort_pending_reports_after_power_loss(None)
                 _create_aborted_report_from_power_loss_checkpoint(None)
             except Exception:
                 app.logger.exception("Abort pending reports after power loss failed")
-            if not pending.get("powerAuditLogged"):
+            if pending and not pending.get("powerAuditLogged"):
                 role = (pending.get("role") or "").strip()
                 audit_time = _audit_time_fields()
                 if audit_service.is_hidden_factory_actor(un, role):
