@@ -15,6 +15,7 @@ import sys
 import time
 import threading
 from datetime import datetime
+from typing import Optional
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 
 try:
@@ -368,8 +369,11 @@ def _power_loss_end_iso(checkpoint: dict = None, report: dict = None) -> str:
     cp = checkpoint if isinstance(checkpoint, dict) else {}
     rp = report if isinstance(report, dict) else {}
     td = rp.get("testData") if isinstance(rp.get("testData"), dict) else {}
+    cp_td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
     for raw in (
         cp.get("_checkpointAt"),
+        cp.get("testEndTime"),
+        cp_td.get("testEndTime"),
         cp.get("_espCommandSentAt"),
         td.get("testEndTime"),
         rp.get("testEndTime"),
@@ -380,39 +384,92 @@ def _power_loss_end_iso(checkpoint: dict = None, report: dict = None) -> str:
     return _utc_now_iso()
 
 
+def _read_duration_seconds_candidate(*dicts) -> Optional[int]:
+    for d in dicts:
+        if not isinstance(d, dict):
+            continue
+        for key in ("durationSeconds", "elapsedSeconds", "durationSec"):
+            raw = d.get(key)
+            if raw is None:
+                continue
+            try:
+                return max(0, int(raw))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 def _apply_power_loss_duration(report: dict, checkpoint: dict = None) -> dict:
-    """Stamp exact duration of the test that ran before power loss onto the report."""
+    """Stamp exact duration of the test that ran before power loss onto the report.
+
+    Start = stable test start from Start-send (reconstructed from end−elapsed when
+    a stale checkpoint incorrectly stored start≈end).
+    End = last durable checkpoint time (not reboot/recovery wall clock).
+    Duration = elapsed seconds captured in the last checkpoint.
+    """
     report = dict(report or {})
     td = report.get("testData")
     td = dict(td) if isinstance(td, dict) else {}
     cp = checkpoint if isinstance(checkpoint, dict) else {}
     cp_td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
 
+    elapsed = _read_duration_seconds_candidate(cp, cp_td, td, report)
+
     start_raw = (
-        td.get("testStartTime")
-        or report.get("testStartTime")
-        or cp.get("testStartTime")
+        cp.get("testStartTime")
         or cp_td.get("testStartTime")
+        or td.get("testStartTime")
+        or report.get("testStartTime")
     )
     end_raw = _power_loss_end_iso(cp, report)
     start_dt = _parse_report_dt(start_raw)
     end_dt = _parse_report_dt(end_raw)
+
     duration = None
     if start_dt is not None and end_dt is not None:
         if start_dt.tzinfo and not end_dt.tzinfo:
             end_dt = end_dt.replace(tzinfo=start_dt.tzinfo)
         elif end_dt.tzinfo and not start_dt.tzinfo:
             start_dt = start_dt.replace(tzinfo=end_dt.tzinfo)
-        duration = max(0, int((end_dt - start_dt).total_seconds()))
-    else:
-        for candidate in (td.get("durationSeconds"), report.get("durationSeconds"), cp.get("durationSeconds"), cp_td.get("durationSeconds")):
-            if candidate is None:
-                continue
+        delta = int((end_dt - start_dt).total_seconds())
+        # Classic bug: only the Start checkpoint was durable, so start≈end even after
+        # a multi-minute run. Reconstruct start from end − elapsed (or end from start+elapsed).
+        if abs(delta) <= 2 and elapsed is not None and elapsed > 2:
             try:
-                duration = max(0, int(candidate))
-                break
-            except (TypeError, ValueError):
-                continue
+                from datetime import timedelta
+                start_dt = end_dt - timedelta(seconds=elapsed)
+                start_raw = start_dt.isoformat().replace("+00:00", "Z")
+                duration = elapsed
+            except Exception:
+                duration = elapsed
+        else:
+            duration = elapsed if (elapsed is not None and elapsed >= 0) else max(0, delta)
+            # If stored elapsed is clearly more accurate than a near-zero delta, prefer it.
+            if elapsed is not None and elapsed > max(0, delta) + 2:
+                duration = elapsed
+                if abs(delta) <= 2:
+                    try:
+                        from datetime import timedelta
+                        start_dt = end_dt - timedelta(seconds=elapsed)
+                        start_raw = start_dt.isoformat().replace("+00:00", "Z")
+                    except Exception:
+                        pass
+    elif elapsed is not None:
+        duration = elapsed
+        if end_dt is not None and start_dt is None and elapsed > 0:
+            try:
+                from datetime import timedelta
+                start_dt = end_dt - timedelta(seconds=elapsed)
+                start_raw = start_dt.isoformat().replace("+00:00", "Z")
+            except Exception:
+                pass
+        elif start_dt is not None and end_dt is None and elapsed > 0:
+            try:
+                from datetime import timedelta
+                end_dt = start_dt + timedelta(seconds=elapsed)
+                end_raw = end_dt.isoformat().replace("+00:00", "Z")
+            except Exception:
+                pass
 
     if start_raw:
         start_iso = str(start_raw).strip()
@@ -842,16 +899,17 @@ def _startup_session_power_audit():
         pending = data_service.read_session_power_audit_pending()
         checkpoint = data_service.get_test_run_data()
         mid_test = _checkpoint_is_mid_test(checkpoint)
-        # Stale clean-stop flag left after a prior logout must not block recovery when
-        # a mid-test checkpoint (or awaiting-approval report) is still on disk.
+        # Stale clean-stop flag left after a prior logout / service restart must not
+        # block recovery when a mid-test checkpoint (or awaiting-approval report) is still on disk.
         if had_clean_shutdown and mid_test:
             had_clean_shutdown = False
             app.logger.warning(
                 "Ignoring stale clean-stop flag; mid-test checkpoint present — treating as unclean shutdown"
             )
 
-        should_recover_reports = (not had_clean_shutdown) and (
-            bool(pending) or mid_test
+        # Mid-test checkpoints ALWAYS recover — clean-stop must never skip report generation.
+        should_recover_reports = mid_test or (
+            (not had_clean_shutdown) and bool(pending)
         )
         # Also abort any pending reports on unclean start even without session pending
         # (e.g. pending file lost but reports.json still has pending approval rows).
@@ -877,7 +935,11 @@ def _startup_session_power_audit():
             # 2) Power interruption report saved (with exact duration)
             try:
                 _abort_pending_reports_after_power_loss(None, checkpoint if mid_test else None)
-                _create_aborted_report_from_power_loss_checkpoint(None)
+                created = _create_aborted_report_from_power_loss_checkpoint(None)
+                if mid_test and not created:
+                    # Checkpoint still present but create returned 0 (e.g. already aborted id) —
+                    # ensure we still clear so we do not loop forever; create() clears on success.
+                    pass
             except Exception:
                 app.logger.exception("Abort pending reports after power loss failed")
             # 3) User logged out due to power interruption
@@ -1996,6 +2058,37 @@ def put_test_run_checkpoint():
         body = request.get_json(force=True, silent=True) or {}
         if not body:
             return jsonify({"ok": False, "error": "Checkpoint body required"}), 400
+        # Preserve the earliest Start-send timestamp across heartbeat syncs.
+        prev = data_service.get_test_run_data()
+        if isinstance(prev, dict) and prev:
+            prev_start = prev.get("testStartTime") or (
+                (prev.get("testData") or {}).get("testStartTime")
+                if isinstance(prev.get("testData"), dict)
+                else None
+            )
+            body_start = body.get("testStartTime") or (
+                (body.get("testData") or {}).get("testStartTime")
+                if isinstance(body.get("testData"), dict)
+                else None
+            )
+            prev_dt = _parse_report_dt(prev_start)
+            body_dt = _parse_report_dt(body_start)
+            keep_start = None
+            if prev_dt is not None and body_dt is not None:
+                keep_start = prev_start if prev_dt <= body_dt else body_start
+            elif prev_start:
+                keep_start = prev_start
+            if keep_start:
+                body["testStartTime"] = keep_start
+                td = body.get("testData") if isinstance(body.get("testData"), dict) else {}
+                td = dict(td)
+                td["testStartTime"] = keep_start
+                body["testData"] = td
+            if prev.get("_testStartedAudited") and not body.get("_testStartedAudited"):
+                body["_testStartedAudited"] = True
+            if prev.get("_espCommandSentAt") and not body.get("_espCommandSentAt"):
+                body["_espCommandSentAt"] = prev.get("_espCommandSentAt")
+                body["_espCommand"] = prev.get("_espCommand") or body.get("_espCommand")
         # START (or first post-START update) commits the run as started for power-loss recovery.
         body = _audit_test_started_on_checkpoint_save(body)
         data_service.save_test_run_data(body)

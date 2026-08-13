@@ -348,8 +348,17 @@ def _load_json_file(filepath: pathlib.Path, default=_LOAD_JSON_USE_LIST_DEFAULT)
 
     def _try_read(path: pathlib.Path):
         try:
+            # VFAT power-cut often leaves a 0-byte inode — treat as truncated, not empty JSON.
+            try:
+                if path.stat().st_size <= 0:
+                    return False, None
+            except OSError:
+                return False, None
             with open(path, "r", encoding="utf-8") as f:
-                return True, json.load(f)
+                raw = f.read()
+            if not raw or not str(raw).strip():
+                return False, None
+            return True, json.loads(raw)
         except Exception:
             return False, None
 
@@ -1832,7 +1841,20 @@ def consume_app_clean_stop_flag() -> bool:
 
 
 def touch_app_clean_stop_flag():
-    """Mark a clean application shutdown (best-effort; used to avoid false power-interruption audits)."""
+    """Mark a clean application shutdown (best-effort; used to avoid false power-interruption audits).
+
+    Never write the flag while a recoverable mid-test checkpoint exists — a service
+    restart or logout must not suppress power-cut report recovery on the next boot.
+    """
+    try:
+        cp = get_test_run_data()
+        if _test_run_checkpoint_is_valuable(cp):
+            phase = str(cp.get("_checkpointPhase") or "").strip().lower()
+            if phase in ("running", "awaiting-approval") or cp.get("status") in ("running", "pending"):
+                _log.info("Skipping clean-stop flag; recoverable test checkpoint present")
+                return
+    except Exception:
+        pass
     path = _get_storage_path(_APP_CLEAN_STOP_FLAG)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1844,24 +1866,99 @@ def touch_app_clean_stop_flag():
 # =================== TEST RUN DATA ==========================
 
 
+def _test_run_mirror_path() -> pathlib.Path:
+    return _app_root_storage_dir() / "test_run.json"
+
+
+def _test_run_checkpoint_is_valuable(data) -> bool:
+    """True when checkpoint JSON looks like an in-progress / recoverable run."""
+    if not isinstance(data, dict) or not data:
+        return False
+    rtype = str(data.get("type") or "").strip().lower()
+    if rtype in ("test", "validation", "calibration"):
+        return True
+    if data.get("_checkpointPhase") or data.get("_pendingReportId") is not None:
+        return True
+    if data.get("measurements") or data.get("testData") or data.get("productName"):
+        return True
+    return bool(data.get("recipeId") or data.get("recipe") or data.get("testStartTime"))
+
+
+def _read_test_run_candidate(path: pathlib.Path) -> Dict[str, Any]:
+    if not path or not path.exists():
+        return {}
+    data = _load_json_file(path, default={})
+    return data if isinstance(data, dict) else {}
+
+
 def save_test_run_data(test_data: Dict[str, Any]):
-    """Save quick test run data."""
+    """Save in-progress test checkpoint to USB + APP_ROOT mirror (VFAT-durable)."""
+    payload = dict(test_data or {}) if isinstance(test_data, dict) else {}
     test_path = _get_storage_path("test_run.json")
-    _save_json_file(test_path, test_data)
+    _save_json_file(test_path, payload)
+    mirror = _test_run_mirror_path()
+    try:
+        if mirror.resolve() != test_path.resolve():
+            mirror.parent.mkdir(parents=True, exist_ok=True)
+            _save_json_file(mirror, payload)
+    except OSError as e:
+        _log.error("test_run mirror write failed: %s", e)
 
 
 def get_test_run_data() -> Dict[str, Any]:
-    """Get last test run data."""
+    """Load checkpoint; recover from .bak / APP_ROOT mirror if USB was wiped empty."""
     test_path = _get_storage_path("test_run.json")
-    return _load_json_file(test_path, default={})
+    mirror = _test_run_mirror_path()
+    bak = test_path.with_suffix(test_path.suffix + ".bak")
+    canon = _read_test_run_candidate(test_path)
+    if _test_run_checkpoint_is_valuable(canon):
+        return canon
+    candidates = (
+        canon,
+        _read_test_run_candidate(bak),
+        _read_test_run_candidate(mirror),
+        _read_test_run_candidate(mirror.with_suffix(mirror.suffix + ".bak")),
+    )
+    best = {}
+    best_score = -1
+    for data in candidates:
+        if not _test_run_checkpoint_is_valuable(data):
+            continue
+        # Prefer the freshest checkpoint stamp / longest elapsed run.
+        score = 0
+        try:
+            score = int(data.get("durationSeconds") or 0)
+        except (TypeError, ValueError):
+            score = 0
+        stamp = str(data.get("_checkpointAt") or data.get("testEndTime") or "")
+        score = score * 1000 + len(stamp)
+        if score >= best_score:
+            best = data
+            best_score = score
+    if _test_run_checkpoint_is_valuable(best):
+        try:
+            _save_json_file(test_path, best)
+            if mirror.resolve() != test_path.resolve():
+                _save_json_file(mirror, best)
+        except OSError as e:
+            _log.error("test_run auto-recover write failed: %s", e)
+        return best
+    return canon if isinstance(canon, dict) else {}
 
 
 def clear_test_run_data() -> None:
-    """Remove in-progress test run checkpoint (after normal complete/abort save)."""
+    """Remove in-progress test run checkpoint (USB, bak, and APP_ROOT mirror)."""
     test_path = _get_storage_path("test_run.json")
-    if test_path.exists():
+    mirror = _test_run_mirror_path()
+    for path in (
+        test_path,
+        test_path.with_suffix(test_path.suffix + ".bak"),
+        mirror,
+        mirror.with_suffix(mirror.suffix + ".bak"),
+    ):
         try:
-            test_path.unlink()
+            if path.exists():
+                path.unlink()
         except Exception:
             pass
 

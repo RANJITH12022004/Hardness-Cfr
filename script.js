@@ -35,7 +35,9 @@ let hardwareEventSource = null; // SSE: ESP lines ERR,BO* / ERR,LC* → unified 
 var _espBackoffModalOpen = false; // Dedupe modal while user has not dismissed backoff error
 var _navigatingAfterAbort = false; // Skip operation-running check when navigating after user chose Abort
 var _navigatingAfterSave = false;   // Skip operation-running check when navigating after factory/member save
-var testRunStartTime = 0; // Set at start of runHardnessTestLoop for duration calculation
+var testRunStartTime = 0; // Set at Start press for duration calculation
+var _hardnessStableStartIso = null; // Frozen ISO start from Start-send (never refreshed on sync)
+var _hardnessCheckpointTimer = null; // 1s heartbeat so power-cut end/elapsed stay current
 
 // ===== OPERATION RUNNING (test / validation / calibration) =====
 function isOperationRunning() {
@@ -186,6 +188,9 @@ function initHardwareStream() {
                     if (hadActiveTest) {
                         testRunAborted = true;
                         testRunActive = false;
+                        if (typeof stopHardnessCheckpointHeartbeat === 'function') {
+                            stopHardnessCheckpointHeartbeat();
+                        }
                         backoffAbortHandled = true;
                         var r = lastTestRunRecipe;
                         var recipeSnap = r;
@@ -4533,11 +4538,29 @@ function resetTestRunReportSaveGate() {
 }
 
 function clearHardnessTestRunCheckpoint() {
+    stopHardnessCheckpointHeartbeat();
+    _hardnessStableStartIso = null;
     var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
     var req = (typeof apiRequest === 'function')
         ? apiRequest(base + '/api/data/test-run/checkpoint', { method: 'DELETE' })
         : fetch(base + '/api/data/test-run/checkpoint', { method: 'DELETE' });
     Promise.resolve(req).catch(function () {});
+}
+
+function stopHardnessCheckpointHeartbeat() {
+    if (_hardnessCheckpointTimer) {
+        clearInterval(_hardnessCheckpointTimer);
+        _hardnessCheckpointTimer = null;
+    }
+}
+
+function startHardnessCheckpointHeartbeat() {
+    stopHardnessCheckpointHeartbeat();
+    _hardnessCheckpointTimer = setInterval(function () {
+        if (typeof testRunActive !== 'undefined' && testRunActive && typeof putHardnessTestRunCheckpoint === 'function') {
+            putHardnessTestRunCheckpoint('running');
+        }
+    }, 1000);
 }
 
 function _checkpointMeasurementStats(meas) {
@@ -4570,9 +4593,11 @@ function putHardnessTestRunCheckpoint(phase, extra) {
         var sampleSize = maxMeasLen > 0
             ? maxMeasLen
             : (parseInt(r.sampleSize, 10) || 0);
-        var startIso = (typeof testRunStartTime !== 'undefined' && testRunStartTime)
-            ? new Date(testRunStartTime).toISOString()
-            : undefined;
+        // Stable start from Start-send — never refresh on heartbeat syncs.
+        if (!_hardnessStableStartIso && typeof testRunStartTime !== 'undefined' && testRunStartTime) {
+            _hardnessStableStartIso = new Date(testRunStartTime).toISOString();
+        }
+        var startIso = _hardnessStableStartIso || undefined;
         var nowIso = new Date().toISOString();
         var durationSeconds = (typeof testRunStartTime !== 'undefined' && testRunStartTime)
             ? Math.max(0, Math.floor((Date.now() - testRunStartTime) / 1000))
@@ -5310,6 +5335,9 @@ async function runHardnessTestLoop() {
     }
 
     testRunActive = false;
+    if (typeof stopHardnessCheckpointHeartbeat === 'function') {
+        stopHardnessCheckpointHeartbeat();
+    }
 
     // Abort / backoff already HOMEd + saved — exit before a second HOME or second report.
     if (typeof backoffAbortHandled !== 'undefined' && backoffAbortHandled) {
@@ -5426,6 +5454,7 @@ function toggleTestRunState() {
         testRunActive = true;
         // Commit start time immediately — any power cut after START is a power failure.
         testRunStartTime = Date.now();
+        _hardnessStableStartIso = new Date(testRunStartTime).toISOString();
         lockNavigation();
         testRunPaused = false;
         testRunAborted = false;
@@ -5434,9 +5463,13 @@ function toggleTestRunState() {
         resetTestRunReportSaveGate();
 
         // Persist checkpoint first (server writes durable Test started audit), then run ESP loop.
+        // 1s heartbeat keeps end/elapsed current for power-cut recovery mid-sample.
         var startCheckpoint = (typeof putHardnessTestRunCheckpoint === 'function')
             ? putHardnessTestRunCheckpoint('running')
             : Promise.resolve(null);
+        if (typeof startHardnessCheckpointHeartbeat === 'function') {
+            startHardnessCheckpointHeartbeat();
+        }
         Promise.resolve(startCheckpoint).then(function () {
             runHardnessTestLoop();
         }).catch(function () {
@@ -5448,6 +5481,9 @@ function toggleTestRunState() {
         showAbortConfirmation(function () {
             testRunAborted = true;
             testRunActive = false;
+            if (typeof stopHardnessCheckpointHeartbeat === 'function') {
+                stopHardnessCheckpointHeartbeat();
+            }
             unlockNavigation();
             userAbortReportHandled = true;
             // Home axis immediately (backend → ESP T,HOME*).
