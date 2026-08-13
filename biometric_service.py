@@ -334,4 +334,34 @@ def delete_template(template_id):
 
 
 def clear_templates():
-    return _exec(bytes([_CMD_EMPTY]), timeout_sec=3.0)
+    """Erase all fingerprint templates from the sensor (factory reset).
+
+    Retries and verifies template count is zero so plates cannot survive a reset.
+    """
+    if not sensor_available():
+        return dict(_hardware_unavailable_response())
+    last = {"ok": False, "error": "Biometric clear did not run"}
+    for attempt in range(3):
+        last = _exec(bytes([_CMD_EMPTY]), timeout_sec=5.0)
+        if not last.get("ok"):
+            time.sleep(0.25)
+            continue
+        count = get_template_count()
+        if count.get("ok") and int(count.get("count") or 0) == 0:
+            return {"ok": True, "cleared": True, "templatesRemaining": 0, "attempts": attempt + 1}
+        # EMPTY acknowledged but count still non-zero — retry.
+        last = {
+            "ok": False,
+            "error": "Sensor still reports {} template(s) after empty".format(count.get("count")),
+            "templatesRemaining": count.get("count"),
+            "attempts": attempt + 1,
+        }
+        time.sleep(0.35)
+    # Final count for caller diagnostics.
+    try:
+        count = get_template_count()
+        if count.get("ok"):
+            last["templatesRemaining"] = count.get("count")
+    except Exception:
+        pass
+    return last

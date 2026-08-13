@@ -838,11 +838,16 @@ def _load_members_raw() -> List[Dict[str, Any]]:
 
 
 def _save_members_raw(members: List[Dict[str, Any]], allow_empty: bool = False) -> None:
-    """Persist members to USB + SD mirror; refuse accidental empty wipe after power-loss."""
+    """Persist members to USB + SD mirror; refuse accidental empty wipe after power-loss.
+
+    Intentional empty saves (factory reset) must pass ``allow_empty=True`` and also
+    clear ``.bak`` so durability recovery cannot resurrect deleted users.
+    """
     if not isinstance(members, list):
         members = []
     members_path = _get_storage_path("members.json")
     mirror = _members_mirror_path()
+    bak = members_path.with_suffix(members_path.suffix + ".bak")
     if (not allow_empty) and (not _members_list_is_valuable(members)):
         existing = _load_members_raw()
         if _members_list_is_valuable(existing):
@@ -857,13 +862,60 @@ def _save_members_raw(members: List[Dict[str, Any]], allow_empty: bool = False) 
                 ),
             )
             return
-    _save_members_raw(members)
+    _save_json_file(members_path, members)
     if mirror.resolve() != members_path.resolve():
         try:
             mirror.parent.mkdir(parents=True, exist_ok=True)
             _save_json_file(mirror, members)
         except OSError as e:
             _log.error("members mirror write failed: %s", e)
+    # Intentional wipe: clear bak copies so sync/load cannot restore old profiles.
+    if allow_empty and not _members_list_is_valuable(members):
+        for path in (bak, mirror.with_suffix(mirror.suffix + ".bak")):
+            try:
+                if path.exists():
+                    _save_json_file(path, [])
+            except OSError as e:
+                _log.error("members bak wipe failed for %s: %s", path, e)
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+
+def wipe_members_storage() -> int:
+    """Factory-reset wipe of all members copies (USB, bak, SD mirror). Returns prior count."""
+    prior = _load_members_raw()
+    n = len(prior) if isinstance(prior, list) else 0
+    _save_members_raw([], allow_empty=True)
+    # Remove stale wiped_/empty_ orphan files so they cannot confuse operators.
+    for base in (_get_storage_path("members.json").parent, _app_root_storage_dir()):
+        try:
+            if not base.exists():
+                continue
+            for p in base.glob("members.json*"):
+                name = p.name
+                if name in ("members.json", "members.json.bak"):
+                    continue
+                if ".wiped_" in name or ".empty_" in name or name.endswith(".tmp"):
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+        except OSError as e:
+            _log.error("members orphan cleanup failed under %s: %s", base, e)
+    # Verify no valuable copy remains; force rewrite if durability paths raced.
+    canonical = _get_storage_path("members.json")
+    bak = canonical.with_suffix(canonical.suffix + ".bak")
+    leftover = _best_members_candidate(
+        _read_members_candidate(canonical),
+        _read_members_candidate(bak),
+        _read_members_candidate(_members_mirror_path()),
+    )
+    if _members_list_is_valuable(leftover):
+        _log.error("members still present after wipe — forcing empty rewrite")
+        _save_members_raw([], allow_empty=True)
+    return n
 
 
 def list_members():
@@ -1531,17 +1583,25 @@ def factory_reset() -> Dict[str, Any]:
     """Delete all operational data. Preserves factorySettings.json only."""
     recipes_path = _get_storage_path("recipes.json")
     reports_path = _get_storage_path("reports.json")
-    members_path = _get_storage_path("members.json")
     test_run_path = _get_storage_path("test_run.json")
     recipes = _load_json_file(recipes_path, default=[])
     reports = _load_json_file(reports_path, default=[])
-    members = _load_members_raw()
     n_recipes = len(recipes) if isinstance(recipes, list) else 0
     n_reports = len(reports) if isinstance(reports, list) else 0
-    n_members = len(members) if isinstance(members, list) else 0
+    n_members = wipe_members_storage()
     _save_json_file(recipes_path, [])
     _save_json_file(reports_path, [])
-    _save_members_raw([], allow_empty=True)
+    # Clear recipe/report bak so mid-write recovery cannot resurrect deleted data.
+    for path in (recipes_path, reports_path):
+        bak = path.with_suffix(path.suffix + ".bak")
+        try:
+            _save_json_file(bak, [])
+        except OSError:
+            try:
+                if bak.exists():
+                    bak.unlink()
+            except OSError:
+                pass
     n_report_files = 0
     if _reports_dir and _reports_dir.exists():
         for f in list(_reports_dir.iterdir()):
@@ -1574,6 +1634,13 @@ def factory_reset() -> Dict[str, Any]:
             n_storage_files += 1
         except Exception:
             pass
+    # Drop test-run bak too.
+    try:
+        tr_bak = test_run_path.with_suffix(test_run_path.suffix + ".bak")
+        if tr_bak.exists():
+            tr_bak.unlink()
+    except OSError:
+        pass
     return {
         "deleted": {
             "recipes": n_recipes,

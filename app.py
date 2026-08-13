@@ -2903,10 +2903,20 @@ def factory_reset():
             audit_remaining = audit_service.entry_count()
 
         biometric_cleared = False
+        biometric_error = None
+        biometric_remaining = None
         try:
             bio_result = biometric_service.clear_templates()
             biometric_cleared = bool(bio_result and bio_result.get("ok"))
+            if bio_result:
+                biometric_remaining = bio_result.get("templatesRemaining")
+                if not biometric_cleared:
+                    biometric_error = bio_result.get("error") or "Failed to clear biometric templates"
+                    app.logger.error("Factory reset: biometric clear failed: %s", biometric_error)
+                else:
+                    app.logger.info("Factory reset: biometric templates cleared")
         except Exception as bio_err:
+            biometric_error = str(bio_err)
             app.logger.warning("Factory reset: biometric clear skipped: %s", bio_err)
 
         if DATETIME_STORAGE.exists():
@@ -2915,12 +2925,32 @@ def factory_reset():
             except Exception:
                 pass
 
+        # Re-check members were actually wiped (durability paths must not resurrect them).
+        leftover_members = []
+        try:
+            leftover_members = data_service.list_members() or []
+        except Exception:
+            leftover_members = []
+        if leftover_members:
+            app.logger.error(
+                "Factory reset: %s member(s) still present after wipe — forcing second wipe",
+                len(leftover_members),
+            )
+            try:
+                data_service.wipe_members_storage()
+                leftover_members = data_service.list_members() or []
+            except Exception:
+                app.logger.exception("Factory reset: second members wipe failed")
+
         return jsonify({
             "success": True,
             "deleted": result["deleted"],
             "auditRowsRemoved": audit_removed,
             "auditRowsRemaining": audit_remaining,
             "biometricTemplatesCleared": biometric_cleared,
+            "biometricTemplatesRemaining": biometric_remaining,
+            "biometricClearError": biometric_error,
+            "membersRemaining": len(leftover_members),
             "requiresLogin": True,
         }), 200
     except Exception as e:
