@@ -387,6 +387,17 @@ function checkNavigationAccess(screenId) {
     }
     return canAccess(userObj || role, 'quick-test') || canAccess(userObj || role, 'recipe-manage');
   }
+  // Shared quick-test form: Quick Test needs quick-test; Create/Edit Recipe needs recipe-manage.
+  if (screenId === 'quick-test') {
+    var qtCt = (typeof window !== 'undefined' && window.currentTest != null)
+      ? window.currentTest
+      : (typeof currentTest !== 'undefined' ? currentTest : null);
+    if (qtCt === 'create-recipe' || qtCt === 'edit-recipe') {
+      return canAccess(userObj || role, 'recipe-manage')
+          || canAccess(userObj || role, 'recipe-edit');
+    }
+    return canAccess(userObj || role, 'quick-test');
+  }
   if (screenId === 'param-tolerance') {
     return canAccess(userObj || role, 'recipe-manage') || canAccess(userObj || role, 'recipe-edit');
   }

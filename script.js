@@ -4425,6 +4425,7 @@ async function editRecipe(recipeId) {
 
     editingRecipeId = recipeId;
     currentTest = 'create-recipe';
+    if (typeof window !== 'undefined') window.currentTest = 'create-recipe';
     currentShape = recipe.shape || currentShape;
     goToPage('quick-test');
 
