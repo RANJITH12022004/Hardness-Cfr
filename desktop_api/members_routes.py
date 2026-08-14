@@ -311,25 +311,35 @@ def register_members_routes(bp, kiosk):
             return jsonify({"error": str(e)}), 500
 
     @bp.route("/members/<int:member_id>/unlock", methods=["POST"])
-    @auth_store.require_internal("user-unlock")
+    @auth_store.require_any_internal(["user-unlock", "user-manage"])
     def desktop_members_unlock(user, member_id):
         try:
             before_member = data_service.get_member(member_id)
+            if not before_member:
+                return jsonify({"error": "Member not found"}), 404
             sig = auth_store.desktop_signature(user)
             member = data_service.unlock_member(member_id)
+            actor_username = str(user.get("username") or user.get("name") or "").strip() or "--"
+            actor_name = str(user.get("name") or actor_username).strip() or "--"
+            target_username = str(member.get("username") or "").strip()
+            target_name = str(member.get("name") or target_username or "").strip() or "--"
+            detail = "Member unlocked: {} ({}) | Unlocked by: {} ({})".format(
+                target_name, target_username or "--", actor_name, actor_username
+            )
             audit_event(
                 kiosk,
                 user,
-                action="User unlock",
+                action="User unlocked",
                 outcome="success",
                 entity_type="member",
                 entity_id=member_id,
-                entity_name=member.get("username") or member.get("name") or "",
-                details="Member unlocked",
-                target_user=member.get("username") or "",
+                entity_name=target_username or target_name,
+                details=detail,
+                target_user=target_username,
                 before=data_service.sanitize_member_for_client(before_member) if before_member else None,
                 after=data_service.sanitize_member_for_client(member) or member,
                 signature=sig,
+                extra={"passwordResetRequired": True},
             )
             safe = data_service.sanitize_member_for_client(member) or dict(member)
             return jsonify({"success": True, "member": safe}), 200
@@ -339,22 +349,31 @@ def register_members_routes(bp, kiosk):
             return jsonify({"error": str(e)}), 500
 
     @bp.route("/members/<int:member_id>/enable", methods=["POST"])
-    @auth_store.require_internal("user-enable")
+    @auth_store.require_any_internal(["user-enable", "user-manage"])
     def desktop_members_enable(user, member_id):
         try:
             before_member = data_service.get_member(member_id)
+            if not before_member:
+                return jsonify({"error": "Member not found"}), 404
             sig = auth_store.desktop_signature(user)
             member = data_service.enable_member(member_id)
+            actor_username = str(user.get("username") or user.get("name") or "").strip() or "--"
+            actor_name = str(user.get("name") or actor_username).strip() or "--"
+            target_username = str(member.get("username") or "").strip()
+            target_name = str(member.get("name") or target_username or "").strip() or "--"
+            detail = "Member enabled: {} ({}) | Enabled by: {} ({})".format(
+                target_name, target_username or "--", actor_name, actor_username
+            )
             audit_event(
                 kiosk,
                 user,
-                action="User enable",
+                action="User enabled",
                 outcome="success",
                 entity_type="member",
                 entity_id=member_id,
-                entity_name=member.get("username") or member.get("name") or "",
-                details="Member enabled",
-                target_user=member.get("username") or "",
+                entity_name=target_username or target_name,
+                details=detail,
+                target_user=target_username,
                 before=data_service.sanitize_member_for_client(before_member) if before_member else None,
                 after=data_service.sanitize_member_for_client(member) or member,
                 signature=sig,

@@ -1551,7 +1551,7 @@ def record_successful_login(username: str) -> Optional[Dict[str, Any]]:
 
 
 def unlock_member(member_id: int) -> Dict[str, Any]:
-    """Set member status to active and reset the login-attempt counter."""
+    """Reactivate a locked account and require password reset on next login."""
     m = get_member(member_id)
     if not m:
         raise ValueError("Member not found")
@@ -1559,6 +1559,8 @@ def unlock_member(member_id: int) -> Dict[str, Any]:
         raise ValueError("The factory user cannot be modified.")
     m["status"] = "active"
     m["failedAttempts"] = 0
+    m["mustChangePassword"] = True
+    _set_creation_password_commitment(m, str(m.get("password") or ""))
     _save_member_record(m)
     return m
 
@@ -1768,11 +1770,12 @@ def clear_current_user():
     with _session_write_lock:
         _current_user = None
         session_path = _get_storage_path("current_user.json")
-        if session_path.exists():
-            try:
-                session_path.unlink()
-            except Exception:
-                pass
+        for path in (session_path, session_path.with_suffix(session_path.suffix + ".bak")):
+            if path.exists():
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
         try:
             parent = session_path.parent
             for p in parent.glob(session_path.name + ".*.tmp"):

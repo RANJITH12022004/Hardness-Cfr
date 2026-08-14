@@ -2756,31 +2756,66 @@ def delete_member(member_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _member_status_change_audit_detail(verb_past, target_member, actor):
+    """Human-readable audit line for enable/unlock (no approval workflow)."""
+    target_name = str((target_member or {}).get("name") or "").strip() or "--"
+    target_username = str((target_member or {}).get("username") or "").strip() or "--"
+    actor_name = str((actor or {}).get("name") or (actor or {}).get("user") or "").strip() or "--"
+    actor_username = str((actor or {}).get("user") or (actor or {}).get("name") or "").strip() or "--"
+    verb_past = str(verb_past or "updated").strip().lower()
+    return "Member {}: {} ({}) | {} by: {} ({})".format(
+        verb_past,
+        target_name,
+        target_username,
+        verb_past.capitalize(),
+        actor_name,
+        actor_username,
+    )
+
+
 @app.route("/api/data/members/<int:member_id>/unlock", methods=["POST"])
 def unlock_member_route(member_id):
-    if not _session_has_internal("user-unlock"):
-        return jsonify({"error": "Forbidden. Unlock requires profile management permission."}), 403
+    gate = _require_any_session_internal(
+        ["user-unlock", "user-manage"],
+        "Forbidden. Unlock requires profile management permission.",
+    )
+    if gate:
+        return gate
     try:
         before_member = data_service.get_member(member_id)
-        cur = data_service.get_current_user() or {}
+        if not before_member:
+            return jsonify({"error": "Member not found"}), 404
+        actor = _audit_actor()
         sig = {
             "mode": "session",
-            "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
-            "role": (cur.get("role") or "").strip() or "--",
+            "username": (actor.get("user") or "").strip() or "--",
+            "role": (actor.get("role") or "").strip() or "--",
         }
         member = data_service.unlock_member(member_id)
+        target_username = str(member.get("username") or "").strip()
+        target_name = str(member.get("name") or target_username or "").strip() or "--"
+        detail = _member_status_change_audit_detail("unlocked", member, actor)
         _audit_event(
-            action="User unlock",
+            action="User unlocked",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
-            entity_name=member.get("username") or member.get("name") or "",
-            details="Member unlocked",
-            target_user=member.get("username") or "",
+            entity_name=target_username or target_name,
+            details=detail,
+            target_user=target_username,
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(member) or member,
             signature=sig,
+            extra={
+                "unlockedMemberUsername": target_username,
+                "unlockedMemberName": target_name,
+                "unlockedByUsername": actor.get("user"),
+                "unlockedByName": actor.get("name"),
+                "unlockedByRole": actor.get("role"),
+                "passwordResetRequired": True,
+            },
         )
+        _audit(actor.get("user"), actor.get("role"), "User unlocked", detail)
         safe = data_service.sanitize_member_for_client(member) or dict(member)
         return jsonify({"success": True, "member": safe}), 200
     except ValueError as e:
@@ -2792,29 +2827,46 @@ def unlock_member_route(member_id):
 
 @app.route("/api/data/members/<int:member_id>/enable", methods=["POST"])
 def enable_member_route(member_id):
-    if not _session_has_internal("user-enable"):
-        return jsonify({"error": "Forbidden. Enable requires profile management permission."}), 403
+    gate = _require_any_session_internal(
+        ["user-enable", "user-manage"],
+        "Forbidden. Enable requires profile management permission.",
+    )
+    if gate:
+        return gate
     try:
         before_member = data_service.get_member(member_id)
-        cur = data_service.get_current_user() or {}
+        if not before_member:
+            return jsonify({"error": "Member not found"}), 404
+        actor = _audit_actor()
         sig = {
             "mode": "session",
-            "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
-            "role": (cur.get("role") or "").strip() or "--",
+            "username": (actor.get("user") or "").strip() or "--",
+            "role": (actor.get("role") or "").strip() or "--",
         }
         member = data_service.enable_member(member_id)
+        target_username = str(member.get("username") or "").strip()
+        target_name = str(member.get("name") or target_username or "").strip() or "--"
+        detail = _member_status_change_audit_detail("enabled", member, actor)
         _audit_event(
-            action="User enable",
+            action="User enabled",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
-            entity_name=member.get("username") or member.get("name") or "",
-            details="Member enabled",
-            target_user=member.get("username") or "",
+            entity_name=target_username or target_name,
+            details=detail,
+            target_user=target_username,
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(member) or member,
             signature=sig,
+            extra={
+                "enabledMemberUsername": target_username,
+                "enabledMemberName": target_name,
+                "enabledByUsername": actor.get("user"),
+                "enabledByName": actor.get("name"),
+                "enabledByRole": actor.get("role"),
+            },
         )
+        _audit(actor.get("user"), actor.get("role"), "User enabled", detail)
         safe = data_service.sanitize_member_for_client(member) or dict(member)
         return jsonify({"success": True, "member": safe}), 200
     except ValueError as e:

@@ -731,53 +731,48 @@ function renderMembersView() {
 
 function unlockMember(id) {
     if (!id) return;
-    if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
-        var role = getCurrentRole();
-        if (!canPerformAction(role, 'user-unlock', 'change')) {
+    var actor = window.currentUser || null;
+    if (typeof canPerformAction === 'function') {
+        var who = actor || (typeof getCurrentRole === 'function' ? getCurrentRole() : null);
+        if (!canPerformAction(who, 'user-unlock', 'change')) {
             showModalCompat('You do not have permission to unlock accounts.', 'Permission');
             return;
         }
     }
-    showConfirmModalCompat('Unlock this account?', 'Unlock Account').then(function (ok) {
+    showConfirmModalCompat(
+        'Unlock this account? The user must reset their password on next login.',
+        'Unlock Account'
+    ).then(function (ok) {
         if (!ok) return;
-        var headers = { 'Content-Type': 'application/json' };
-        if (window.currentUser && window.currentUser.role) headers['X-User-Role'] = window.currentUser.role;
-        fetch((API_BASE || '') + '/api/data/members/' + id + '/unlock', { method: 'POST', headers: headers })
-            .then(function (r) { return r.json().catch(function () { return {}; }).then(function (b) { return { ok: r.ok, status: r.status, body: b }; }); })
-            .then(function (res) {
-                if (!res.ok) throw new Error((res.body && res.body.error) ? res.body.error : ('HTTP ' + res.status));
+        return apiRequest(API_BASE + '/api/data/members/' + id + '/unlock', { method: 'POST', body: {} })
+            .then(function () {
                 loadMembersAndRender();
-                showModalCompat('Account unlocked.', 'Unlock');
-            })
-            .catch(function (err) {
-                showModalCompat('Failed to unlock: ' + (err && err.message ? err.message : 'Unknown error'), 'Unlock');
+                showModalCompat('Account unlocked. Password reset is required on next login.', 'Unlock');
             });
+    }).catch(function (err) {
+        showModalCompat('Failed to unlock: ' + (err && err.message ? err.message : 'Unknown error'), 'Unlock');
     });
 }
 
 function enableMember(id) {
     if (!id) return;
-    if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
-        var role = getCurrentRole();
-        if (!canPerformAction(role, 'user-enable', 'change')) {
+    var actor = window.currentUser || null;
+    if (typeof canPerformAction === 'function') {
+        var who = actor || (typeof getCurrentRole === 'function' ? getCurrentRole() : null);
+        if (!canPerformAction(who, 'user-enable', 'change')) {
             showModalCompat('You do not have permission to enable accounts.', 'Permission');
             return;
         }
     }
     showConfirmModalCompat('Enable this account?', 'Enable Account').then(function (ok) {
         if (!ok) return;
-        var headers = { 'Content-Type': 'application/json' };
-        if (window.currentUser && window.currentUser.role) headers['X-User-Role'] = window.currentUser.role;
-        fetch((API_BASE || '') + '/api/data/members/' + id + '/enable', { method: 'POST', headers: headers })
-            .then(function (r) { return r.json().catch(function () { return {}; }).then(function (b) { return { ok: r.ok, status: r.status, body: b }; }); })
-            .then(function (res) {
-                if (!res.ok) throw new Error((res.body && res.body.error) ? res.body.error : ('HTTP ' + res.status));
+        return apiRequest(API_BASE + '/api/data/members/' + id + '/enable', { method: 'POST', body: {} })
+            .then(function () {
                 loadMembersAndRender();
                 showModalCompat('Account enabled.', 'Enable');
-            })
-            .catch(function (err) {
-                showModalCompat('Failed to enable: ' + (err && err.message ? err.message : 'Unknown error'), 'Enable');
             });
+    }).catch(function (err) {
+        showModalCompat('Failed to enable: ' + (err && err.message ? err.message : 'Unknown error'), 'Enable');
     });
 }
 
@@ -1186,7 +1181,8 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
         'Approval verification', 'Disable Recipe', 'Recipe disabled',
         'Export approved', 'Reports exported', 'Audit trail exported', 'Recipes exported',
         'Validation due date set', 'Calibration due date set',
-        'Added new user', 'Password changed', 'User create', 'User update'
+        'Added new user', 'Password changed', 'User create', 'User update',
+        'User enabled', 'User unlocked', 'User disabled', 'User disable', 'User disable approved'
     ];
     coreActions.forEach(function (a) {
         if (actions.indexOf(a) === -1) actions.push(a);
