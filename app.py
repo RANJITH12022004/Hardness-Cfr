@@ -2613,7 +2613,10 @@ def update_member(member_id):
 @app.route("/api/data/members/<int:member_id>", methods=["DELETE"])
 def delete_member(member_id):
     try:
-        gate = _require_session_internal("user-delete", "Forbidden. You do not have permission to delete users.")
+        gate = _require_any_session_internal(
+            ["user-delete", "user-manage"],
+            "Forbidden. You do not have permission to disable users.",
+        )
         if gate:
             return gate
         member = data_service.get_member(member_id)
@@ -2628,70 +2631,21 @@ def delete_member(member_id):
         disabler_username = (actor.get("user") or "").strip() or "--"
         disabler_name = (actor.get("name") or disabler_username).strip() or "--"
         disabler_role = (actor.get("role") or "").strip() or "--"
-
-        role = _effective_request_role()
-        verified = None
-        if role == "factory":
-            verified = {
-                "username": disabler_username if disabler_username != "--" else data_service.FACTORY_USERNAME,
-                "name": disabler_name,
-                "role": "factory",
-            }
-        else:
-            verified, verify_err = _require_user_admin_verification()
-            if not verified:
-                _audit_event(
-                    action="User disable",
-                    outcome="denied",
-                    entity_type="member",
-                    entity_id=member_id,
-                    entity_name=target_username or target_name,
-                    details=verify_err or "Approval verification required",
-                    target_user=target_username,
-                    before=member,
-                    extra={
-                        "disabledMember": target_username or target_name,
-                        "requestedBy": disabler_username,
-                    },
-                )
-                return jsonify({"error": verify_err or "Approval verification is required."}), 403
-            verifier_un = _norm_username(verified.get("username"))
-            if verifier_un and verifier_un == _norm_username(disabler_username) and role != "factory":
-                _audit_event(
-                    action="User disable",
-                    outcome="denied",
-                    entity_type="member",
-                    entity_id=member_id,
-                    entity_name=target_username or target_name,
-                    details="Requester cannot approve their own disable action",
-                    target_user=target_username,
-                    before=member,
-                    signature={
-                        "mode": "password_reconfirm",
-                        "username": verified.get("username"),
-                        "role": verified.get("role"),
-                    },
-                )
-                return jsonify({"error": "Approver must be a different user with Profile management permission."}), 403
-
-        approver_username = (verified.get("username") or "").strip() or "--"
-        approver_name = (verified.get("name") or approver_username).strip() or "--"
-        approver_role = (verified.get("role") or "").strip() or "--"
+        sig = {
+            "mode": "session",
+            "username": disabler_username,
+            "role": disabler_role,
+        }
         before_member = dict(member)
         template_id = member.get("fingerprintTemplateId")
         if template_id is not None:
             deleted = biometric_service.delete_template(template_id)
             if not deleted.get("ok"):
-                detail = (
-                    "Disable failed (fingerprint): member {} ({}) | requested by {} ({}) | "
-                    "approver {} ({}) | {}"
-                ).format(
+                detail = "Member disable failed (fingerprint): {} ({}) | Disabled by: {} ({}) | {}".format(
                     target_name,
                     target_username or "--",
                     disabler_name,
                     disabler_username,
-                    approver_name,
-                    approver_username,
                     deleted.get("error") or "sensor template delete failed",
                 )
                 _audit_event(
@@ -2703,7 +2657,7 @@ def delete_member(member_id):
                     details=detail,
                     target_user=target_username,
                     before=before_member,
-                    signature={"mode": "password_reconfirm", "username": approver_username, "role": approver_role},
+                    signature=sig,
                     extra={"templateId": template_id},
                 )
                 return jsonify({
@@ -2712,18 +2666,9 @@ def delete_member(member_id):
                 }), 400
             data_service.clear_member_biometric(member_id)
         member = data_service.disable_member(member_id)
-        detail = (
-            "Member disabled: {} ({}) | disabled by: {} ({}) | approved by: {} ({})"
-        ).format(
-            target_name,
-            target_username or "--",
-            disabler_name,
-            disabler_username,
-            approver_name,
-            approver_username,
-        )
+        detail = _member_status_change_audit_detail("disabled", member, actor)
         _audit_event(
-            action="User disable",
+            action="User disabled",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
@@ -2732,7 +2677,7 @@ def delete_member(member_id):
             target_user=target_username,
             before=before_member,
             after=member,
-            signature={"mode": "password_reconfirm", "username": approver_username, "role": approver_role},
+            signature=sig,
             extra={
                 "templateIdFreed": template_id,
                 "disabledMemberUsername": target_username,
@@ -2740,14 +2685,9 @@ def delete_member(member_id):
                 "disabledByUsername": disabler_username,
                 "disabledByName": disabler_name,
                 "disabledByRole": disabler_role,
-                "approvedByUsername": approver_username,
-                "approvedByName": approver_name,
-                "approvedByRole": approver_role,
             },
         )
-        # Clear human-readable trail rows (who disabled / who / who approved).
         _audit(disabler_username, disabler_role, "User disabled", detail)
-        _audit(approver_username, approver_role, "User disable approved", detail)
         return jsonify({"success": True, "member": member}), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

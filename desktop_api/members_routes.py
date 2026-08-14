@@ -166,7 +166,7 @@ def register_members_routes(bp, kiosk):
             return jsonify({"error": str(e)}), 500
 
     @bp.route("/members/<int:member_id>", methods=["DELETE"])
-    @auth_store.require_internal("user-delete")
+    @auth_store.require_any_internal(["user-delete", "user-manage"])
     def desktop_members_delete(user, member_id):
         try:
             member = data_service.get_member(member_id)
@@ -179,54 +179,7 @@ def register_members_routes(bp, kiosk):
             disabler_username = str(user.get("username") or user.get("name") or "").strip() or "--"
             disabler_name = str(user.get("name") or disabler_username).strip() or "--"
             disabler_role = str(user.get("role") or "").strip() or "--"
-            verified, verify_err = auth_store.consume_approval_verify_token("user_admin")
-            if not verified:
-                audit_event(
-                    kiosk,
-                    user,
-                    action="User disable",
-                    outcome="denied",
-                    entity_type="member",
-                    entity_id=member_id,
-                    entity_name=member.get("username") or member.get("name") or "",
-                    details=verify_err or "Approval verification required",
-                    target_user=member.get("username") or "",
-                    before=member,
-                )
-                return jsonify({"error": verify_err}), 403
-            approver_username = str(verified.get("username") or verified.get("name") or "").strip() or "--"
-            approver_name = str(verified.get("name") or approver_username).strip() or "--"
-            approver_role = str(verified.get("role") or "").strip() or "--"
-            if (
-                approver_username.lower() == disabler_username.lower()
-                and disabler_role.lower() != "factory"
-            ):
-                detail = "Requester {} ({}) cannot approve disabling {} ({})".format(
-                    disabler_name,
-                    disabler_username,
-                    target_name,
-                    target_username or "--",
-                )
-                audit_event(
-                    kiosk,
-                    user,
-                    action="User disable",
-                    outcome="denied",
-                    entity_type="member",
-                    entity_id=member_id,
-                    entity_name=target_username or target_name,
-                    details=detail,
-                    target_user=target_username,
-                    before=member,
-                    signature={
-                        "mode": "password_reconfirm",
-                        "username": approver_username,
-                        "role": approver_role,
-                    },
-                )
-                return jsonify({
-                    "error": "Approver must be a different user with Profile management permission."
-                }), 403
+            sig = auth_store.desktop_signature(user)
             before_member = dict(member)
             template_id = member.get("fingerprintTemplateId")
             if template_id is not None:
@@ -247,11 +200,7 @@ def register_members_routes(bp, kiosk):
                             or "Failed to delete fingerprint template from sensor",
                             target_user=member.get("username") or "",
                             before=before_member,
-                            signature={
-                                "mode": "password_reconfirm",
-                                "username": verified.get("username"),
-                                "role": verified.get("role"),
-                            },
+                            signature=sig,
                             extra={"templateId": template_id},
                         )
                         return jsonify(
@@ -265,33 +214,25 @@ def register_members_routes(bp, kiosk):
                 except ImportError:
                     pass
             member = data_service.disable_member(member_id)
-            detail = (
-                "Member disabled: {} ({}) | disabled by: {} ({}) | approved by: {} ({})"
-            ).format(
+            detail = "Member disabled: {} ({}) | Disabled by: {} ({})".format(
                 target_name,
                 target_username or "--",
                 disabler_name,
                 disabler_username,
-                approver_name,
-                approver_username,
             )
             audit_event(
                 kiosk,
                 user,
-                action="User disable",
+                action="User disabled",
                 outcome="success",
                 entity_type="member",
                 entity_id=member_id,
-                entity_name=member.get("username") or member.get("name") or "",
+                entity_name=target_username or target_name,
                 details=detail,
-                target_user=member.get("username") or "",
+                target_user=target_username,
                 before=before_member,
                 after=member,
-                signature={
-                    "mode": "password_reconfirm",
-                    "username": verified.get("username"),
-                    "role": verified.get("role"),
-                },
+                signature=sig,
                 extra={
                     "templateIdFreed": template_id,
                     "disabledMemberUsername": target_username,
@@ -299,9 +240,6 @@ def register_members_routes(bp, kiosk):
                     "disabledByUsername": disabler_username,
                     "disabledByName": disabler_name,
                     "disabledByRole": disabler_role,
-                    "approvedByUsername": approver_username,
-                    "approvedByName": approver_name,
-                    "approvedByRole": approver_role,
                 },
             )
             return jsonify({"success": True, "member": member}), 200

@@ -477,44 +477,15 @@ function disableMember(id) {
         ? ((target.name || target.username || ('#' + id)) + (target.username ? ' (' + target.username + ')' : ''))
         : ('member #' + id);
     showConfirmModalCompat(
-        'Disable ' + targetLabel + '? An approver with Profile management permission must confirm.',
+        'Disable ' + targetLabel + '?',
         'Disable Member'
     ).then(function (ok) {
         if (!ok) return;
-        var role = typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '';
-        var approvalP = Promise.resolve('');
-        if (role !== 'factory') {
-            if (typeof openApprovalVerifyModal !== 'function') {
-                showModalCompat('Approval verification UI is unavailable.', 'Disable Member');
-                return;
-            }
-            var opts = (typeof _approvalVerifyModalOptionsForUserAdmin === 'function')
-                ? _approvalVerifyModalOptionsForUserAdmin()
-                : {
-                    purpose: 'user_admin',
-                    titleText: 'Profile disable approval required',
-                    subtitleText: 'Enter credentials for a user with Profile management permission.',
-                    usernameLabelText: 'Approver username',
-                    usernamePlaceholder: 'Approver username',
-                    emptyCredentialsMessage: 'Enter approver username and password.'
-                };
-            approvalP = openApprovalVerifyModal(opts).then(function (token) {
-                return token || '';
-            });
-        }
-        return approvalP.then(function (token) {
-            if (role !== 'factory' && !token) {
-                showModalCompat('Disable cancelled — approval is required.', 'Disable Member');
-                return;
-            }
-            var headers = token ? { 'X-Approval-Verify-Token': token } : {};
-            return apiRequest(API_BASE + '/api/data/members/' + id, {
-                method: 'DELETE',
-                headers: headers
-            }).then(function () {
-                showModalCompat('Member disabled successfully.', 'Disable Member');
-                loadMembersAndRender();
-            });
+        return apiRequest(API_BASE + '/api/data/members/' + id, {
+            method: 'DELETE'
+        }).then(function () {
+            showModalCompat('Member disabled successfully.', 'Disable Member');
+            loadMembersAndRender();
         });
     }).catch(function (err) {
         console.error('Failed to disable member', err);
