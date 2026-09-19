@@ -17,6 +17,11 @@ fi
 echo "==> Hardening script permissions"
 /bin/bash "$APP_ROOT/scripts/kiosk_harden_permissions.sh"
 
+echo "==> Installing mount-internal-usb command"
+if [ -x "$APP_ROOT/scripts/mount-internal-usb" ]; then
+  install -m 0755 "$APP_ROOT/scripts/mount-internal-usb" /usr/local/sbin/mount-internal-usb
+fi
+
 echo "==> Internal USB mount (fstab + directories)"
 INTERNAL_USB_UUID=""
 if [ -f "$APP_ROOT/config/internal_usb.env" ]; then

@@ -19,3 +19,4 @@ db/*.db
 db/*.db.*
 reports/*.pdf
 assets/imiage print binary
+config/internal_usb.env

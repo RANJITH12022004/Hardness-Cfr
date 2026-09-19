@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# Mount a connected pendrive as the kiosk internal USB at /media/usb_internal.
+#
+# Usage:
+#   sudo mount-internal-usb              # auto-detect USB partition
+#   sudo mount-internal-usb /dev/sda1    # explicit partition
+#   sudo mount-internal-usb --repair     # fsck + remount if needed
+#   sudo mount-internal-usb --help
+#
+# Persists the chosen drive (UUID/partition) into:
+#   /opt/kiosk/config/internal_usb.env
+#   /etc/fstab
+#   /etc/udev/rules.d/99-kiosk-internal-usb.rules
+#   systemd drop-ins for bridge + internal-usb-mount
+set -euo pipefail
+
+APP_ROOT="${APP_ROOT:-/opt/kiosk}"
+MOUNT_POINT="${INTERNAL_USB_PATH:-/media/usb_internal}"
+KIOSK_UID="${KIOSK_UID:-1000}"
+KIOSK_GID="${KIOSK_GID:-1000}"
+ENV_FILE="$APP_ROOT/config/internal_usb.env"
+UDEV_RULES="/etc/udev/rules.d/99-kiosk-internal-usb.rules"
+FSTAB_MARKER="# kiosk-internal-usb"
+MOUNT_OPTS="rw,uid=${KIOSK_UID},gid=${KIOSK_GID},fmask=0133,dmask=0022,errors=remount-ro,flush"
+DO_REPAIR=0
+DO_RESTART=0
+PART_ARG=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  sudo mount-internal-usb [PARTITION]
+  sudo mount-internal-usb --repair [PARTITION]
+  sudo mount-internal-usb --restart [PARTITION]
+
+Mount a USB pendrive at /media/usb_internal and register it as the
+kiosk internal storage (updates fstab, udev, and config).
+
+Options:
+  PARTITION   Block device, e.g. /dev/sda1 (default: auto-detect)
+  --repair    Run fsck.vfat before mount (slower; use if dirty/RO)
+  --restart   Restart kiosk-bridge after a successful mount
+  -h, --help  Show this help
+EOF
+}
+
+log() { echo "mount-internal-usb: $*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --repair) DO_REPAIR=1; shift ;;
+    --restart) DO_RESTART=1; shift ;;
+    -*) die "unknown option: $1 (try --help)" ;;
+    *)
+      [[ -z "$PART_ARG" ]] || die "unexpected argument: $1"
+      PART_ARG="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ "$(id -u)" -eq 0 ]] || die "run as root: sudo mount-internal-usb ${PART_ARG:+$PART_ARG}"
+
+_is_usb_disk() {
+  local disk="$1" tran=""
+  tran="$(lsblk -ndo TRAN "$disk" 2>/dev/null || true)"
+  [[ "$tran" == "usb" ]]
+}
+
+_parent_disk() {
+  local part="$1" parent=""
+  parent="$(lsblk -no PKNAME "$part" 2>/dev/null | head -1 || true)"
+  if [[ -n "$parent" ]]; then
+    printf '/dev/%s' "$parent"
+    return 0
+  fi
+  # Fallback: strip trailing partition digits (sda1 -> sda)
+  printf '%s' "${part%%[0-9]*}"
+}
+
+_list_usb_partitions() {
+  local name type fstype tran
+  lsblk -Pnr -o NAME,TYPE,FSTYPE,TRAN 2>/dev/null | while IFS= read -r line; do
+    eval "$line"
+    [[ "$TYPE" == "part" ]] || continue
+    [[ -n "${FSTYPE:-}" ]] || continue
+    # TRAN is usually set on the parent disk; check parent if empty
+    if [[ "${TRAN:-}" != "usb" ]]; then
+      parent="$(lsblk -ndo TRAN "/dev/$(lsblk -no PKNAME "/dev/$NAME" 2>/dev/null | head -1)" 2>/dev/null || true)"
+      [[ "$parent" == "usb" ]] || continue
+    fi
+    # Never use the SD/eMMC root disk partitions
+    [[ "$NAME" == mmcblk* ]] && continue
+    printf '/dev/%s\n' "$NAME"
+  done
+}
+
+_resolve_partition() {
+  local arg="${1:-}" cand="" candidates=() label=""
+  if [[ -n "$arg" ]]; then
+    if [[ -b "$arg" ]]; then
+      printf '%s' "$arg"
+      return 0
+    fi
+    die "not a block device: $arg"
+  fi
+
+  # Prefer configured partition if it exists and is on USB
+  if [[ -f "$ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    if [[ -n "${INTERNAL_USB_PARTITION:-}" && -b "$INTERNAL_USB_PARTITION" ]]; then
+      disk="$(_parent_disk "$INTERNAL_USB_PARTITION")"
+      if _is_usb_disk "$disk"; then
+        printf '%s' "$INTERNAL_USB_PARTITION"
+        return 0
+      fi
+    fi
+    if [[ -n "${INTERNAL_USB_UUID:-}" ]]; then
+      cand="$(blkid -U "$INTERNAL_USB_UUID" 2>/dev/null || true)"
+      if [[ -n "$cand" && -b "$cand" ]]; then
+        printf '%s' "$cand"
+        return 0
+      fi
+    fi
+  fi
+
+  # Prefer label used on kiosk pendrives
+  for cand in /dev/disk/by-label/EVMUSB2PD /dev/disk/by-partlabel/EVMUSB2PD; do
+    if [[ -e "$cand" ]]; then
+      printf '%s' "$(readlink -f "$cand")"
+      return 0
+    fi
+  done
+
+  mapfile -t candidates < <(_list_usb_partitions | sort -u)
+  if [[ ${#candidates[@]} -eq 1 ]]; then
+    printf '%s' "${candidates[0]}"
+    return 0
+  fi
+  if [[ ${#candidates[@]} -eq 0 ]]; then
+    # Last resort: common first USB partition
+    if [[ -b /dev/sda1 ]] && _is_usb_disk /dev/sda; then
+      printf '%s' /dev/sda1
+      return 0
+    fi
+    die "no USB pendrive partition found — plug in a drive or pass /dev/sdX1"
+  fi
+
+  log "multiple USB partitions found:"
+  for cand in "${candidates[@]}"; do
+    label="$(blkid -o value -s LABEL "$cand" 2>/dev/null || true)"
+    uuid="$(blkid -o value -s UUID "$cand" 2>/dev/null || true)"
+    log "  $cand  label=${label:-?}  uuid=${uuid:-?}"
+  done
+  die "pass the partition explicitly, e.g. sudo mount-internal-usb ${candidates[0]}"
+}
+
+_writable() {
+  touch "$MOUNT_POINT/.kiosk_write_test" 2>/dev/null || return 1
+  rm -f "$MOUNT_POINT/.kiosk_write_test" 2>/dev/null || true
+  return 0
+}
+
+_umount_point() {
+  systemctl stop media-usb_internal.mount 2>/dev/null || true
+  if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    sync || true
+    umount -f "$MOUNT_POINT" 2>/dev/null || umount -l "$MOUNT_POINT" 2>/dev/null || true
+  fi
+  # Also unmount if this partition is mounted elsewhere
+  local src="$1" other=""
+  other="$(findmnt -n -o TARGET --source "$src" 2>/dev/null | head -1 || true)"
+  if [[ -n "$other" && "$other" != "$MOUNT_POINT" ]]; then
+    umount -f "$other" 2>/dev/null || umount -l "$other" 2>/dev/null || true
+  fi
+}
+
+_persist() {
+  local part="$1" uuid="$2" disk pkname
+  disk="$(_parent_disk "$part")"
+  pkname="$(basename "$disk")"
+
+  mkdir -p "$APP_ROOT/config"
+  cat >"$ENV_FILE" <<EOF
+INTERNAL_USB_UUID=${uuid}
+INTERNAL_USB_PKNAME=${pkname}
+INTERNAL_USB_PARTITION=${part}
+EOF
+  chmod 644 "$ENV_FILE"
+
+  # fstab: single clean entry
+  mkdir -p "$MOUNT_POINT"
+  chown "${KIOSK_UID}:${KIOSK_GID}" "$MOUNT_POINT" 2>/dev/null || true
+  if [[ -f /etc/fstab ]]; then
+    cp /etc/fstab "/etc/fstab.bak.$(date +%Y%m%d%H%M%S)"
+    # Drop prior kiosk markers + any line mounting this path
+    awk -v mp="$MOUNT_POINT" -v marker="$FSTAB_MARKER" '
+      $0 == marker { next }
+      $0 ~ ("[[:space:]]" mp "[[:space:]]") { next }
+      { print }
+    ' /etc/fstab > /tmp/fstab.kiosk.new
+    {
+      echo "$FSTAB_MARKER"
+      echo "UUID=${uuid}  ${MOUNT_POINT}  vfat  defaults,nofail,uid=${KIOSK_UID},gid=${KIOSK_GID},dmask=0022,fmask=0133,errors=remount-ro,x-systemd.device-timeout=3  0  2"
+    } >> /tmp/fstab.kiosk.new
+    mv /tmp/fstab.kiosk.new /etc/fstab
+  fi
+
+  cat >"$UDEV_RULES" <<EOF
+# Remount internal kiosk USB when the pendrive is plugged in after boot.
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_FS_UUID}=="${uuid}", TAG+="systemd", ENV{SYSTEMD_WANTS}="kiosk-internal-usb-mount.service"
+EOF
+  cp "$UDEV_RULES" "$APP_ROOT/config/99-kiosk-internal-usb.rules" 2>/dev/null || true
+
+  mkdir -p /etc/systemd/system/kiosk-bridge.service.d
+  cat >/etc/systemd/system/kiosk-bridge.service.d/internal-usb.conf <<EOF
+[Service]
+Environment=INTERNAL_USB_PATH=${MOUNT_POINT}
+Environment=STORAGE_DIR=${MOUNT_POINT}/storage
+Environment=REPORTS_DIR=${MOUNT_POINT}/reports
+Environment=AUDIT_DB_DIR=${MOUNT_POINT}/db
+Environment=INTERNAL_USB_UUIDS=${uuid}
+Environment=INTERNAL_USB_UUID=${uuid}
+Environment=INTERNAL_USB_PKNAME=${pkname}
+Environment=INTERNAL_USB_PARTITION=${part}
+EOF
+
+  mkdir -p /etc/systemd/system/kiosk-internal-usb-mount.service.d
+  cat >/etc/systemd/system/kiosk-internal-usb-mount.service.d/internal-usb.conf <<EOF
+[Service]
+Environment=INTERNAL_USB_PATH=${MOUNT_POINT}
+Environment=STORAGE_DIR=${MOUNT_POINT}/storage
+Environment=REPORTS_DIR=${MOUNT_POINT}/reports
+Environment=AUDIT_DB_DIR=${MOUNT_POINT}/db
+Environment=INTERNAL_USB_UUID=${uuid}
+Environment=INTERNAL_USB_PARTITION=${part}
+EOF
+
+  udevadm control --reload-rules 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+}
+
+_fsck_fast() {
+  local part="$1" rc=0
+  log "fsck.vfat -a $part"
+  set +e
+  fsck.vfat -a "$part"
+  rc=$?
+  set -e
+  [[ $rc -eq 0 || $rc -eq 1 ]] && return 0
+  log "fsck exit $rc — retrying with -y"
+  set +e
+  fsck.vfat -a -y "$part"
+  rc=$?
+  set -e
+  [[ $rc -eq 0 || $rc -eq 1 ]]
+}
+
+# --- main ---
+PART="$(_resolve_partition "$PART_ARG")"
+[[ -b "$PART" ]] || die "partition vanished: $PART"
+
+FSTYPE="$(blkid -o value -s TYPE "$PART" 2>/dev/null || true)"
+UUID="$(blkid -o value -s UUID "$PART" 2>/dev/null || true)"
+LABEL="$(blkid -o value -s LABEL "$PART" 2>/dev/null || true)"
+[[ -n "$UUID" ]] || die "could not read UUID for $PART"
+[[ "${FSTYPE:-}" == "vfat" || "${FSTYPE:-}" == "fat32" || "${FSTYPE:-}" == "fat16" || -z "${FSTYPE:-}" ]] \
+  || die "expected vfat partition, got fstype=${FSTYPE:-unknown} on $PART"
+
+log "using $PART  uuid=$UUID  label=${LABEL:-none}  fstype=${FSTYPE:-vfat}"
+
+_ensure_project_dirs() {
+  mkdir -p "$MOUNT_POINT/storage" "$MOUNT_POINT/reports" "$MOUNT_POINT/db"
+  chown -R "${KIOSK_UID}:${KIOSK_GID}" "$MOUNT_POINT/storage" "$MOUNT_POINT/reports" "$MOUNT_POINT/db" 2>/dev/null || true
+}
+
+_do_mount() {
+  mkdir -p "$MOUNT_POINT"
+  chown "${KIOSK_UID}:${KIOSK_GID}" "$MOUNT_POINT" 2>/dev/null || true
+  # Prevent fstab unit from racing/unmounting while we bind the new stick
+  systemctl stop media-usb_internal.mount 2>/dev/null || true
+  if ! mount -t vfat -o "$MOUNT_OPTS" "$PART" "$MOUNT_POINT" 2>/dev/null; then
+    log "direct mount failed — trying fsck then remount"
+    _fsck_fast "$PART" || true
+    mount -t vfat -o "$MOUNT_OPTS" "$PART" "$MOUNT_POINT" \
+      || die "mount failed for $PART -> $MOUNT_POINT"
+  fi
+  _writable || die "mounted but not writable at $MOUNT_POINT"
+}
+
+# Already mounted correctly?
+if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+  cur="$(findmnt -n -o SOURCE --target "$MOUNT_POINT" 2>/dev/null || true)"
+  cur_uuid="$(findmnt -n -o UUID --target "$MOUNT_POINT" 2>/dev/null || true)"
+  if [[ "$cur_uuid" == "$UUID" || "$cur" == "$PART" || "$cur" == "/dev/disk/by-uuid/$UUID" ]] && _writable; then
+    # Persist first (may daemon-reload); then re-assert mount if unit raced
+    _persist "$PART" "$UUID"
+    if ! mountpoint -q "$MOUNT_POINT" 2>/dev/null || ! _writable; then
+      _umount_point "$PART"
+      _do_mount
+    fi
+    _ensure_project_dirs
+    sync || true
+    log "already mounted writable at $MOUNT_POINT"
+    findmnt -n "$MOUNT_POINT" 2>/dev/null || true
+    echo "INTERNAL_USB_UUID=$UUID"
+    echo "INTERNAL_USB_PARTITION=$PART"
+    echo "MOUNT_POINT=$MOUNT_POINT"
+    [[ "$DO_RESTART" -eq 1 ]] && systemctl restart kiosk-bridge.service
+    exit 0
+  fi
+fi
+
+# Persist UUID/fstab/udev BEFORE mounting so systemd generator matches the stick
+_persist "$PART" "$UUID"
+_umount_point "$PART"
+
+if [[ "$DO_REPAIR" -eq 1 ]]; then
+  _fsck_fast "$PART" || log "WARN fsck reported issues (continuing)"
+fi
+
+_do_mount
+_ensure_project_dirs
+sync || true
+
+log "mounted $(findmnt -n -o SOURCE,TARGET,FSTYPE "$MOUNT_POINT" 2>/dev/null || echo "$PART -> $MOUNT_POINT")"
+log "persisted as internal USB (uuid=$UUID part=$PART)"
+echo "INTERNAL_USB_UUID=$UUID"
+echo "INTERNAL_USB_PARTITION=$PART"
+echo "MOUNT_POINT=$MOUNT_POINT"
+
+if [[ "$DO_RESTART" -eq 1 ]]; then
+  log "restarting kiosk-bridge"
+  systemctl restart kiosk-bridge.service
+fi
+
+exit 0
