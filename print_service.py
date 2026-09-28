@@ -1269,8 +1269,11 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             lines.append("Test Data (S.No, " + ", ".join(report_param_cols) + ", Result):")
         lines.append("")
         # Always define widths — thermal path also formats cells with test_col_width.
+        # S.No must not be clipped: width 2 turned "100" into "10" (ljust+slice).
+        # Keep the "S.No" header (4) and any 3+ digit sample index intact.
         test_col_width = 5 if thermal else 6
-        test_widths = [2] + [test_col_width] * len(report_param_cols) + [6]
+        sno_width = max(4, len(str(max(1, sample_size))))
+        test_widths = [sno_width] + [test_col_width] * len(report_param_cols) + [6]
         # Header row (A4 only)
         if not thermal:
             header = ["S.No"] + report_param_cols + ["Result"]
