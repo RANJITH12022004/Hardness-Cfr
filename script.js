@@ -1937,6 +1937,13 @@ async function loadReports(filterType) {
     const tbody = document.getElementById('reports-table-body');
     if (!tbody) return;
 
+    var theadRow = document.getElementById('reports-thead-row');
+    if (theadRow) {
+        theadRow.innerHTML = '<th>SL No</th><th>Report Name</th><th>Creation Time</th><th>Action</th>';
+    }
+    var auditBar = document.getElementById('audit-filters-bar');
+    if (auditBar) auditBar.style.display = 'none';
+
     tbody.innerHTML = '';
 
     if (reports.length === 0) {
