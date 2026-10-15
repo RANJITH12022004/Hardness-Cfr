@@ -31,8 +31,14 @@ api_ok() {
 }
 
 display_ok() {
-  pgrep -f '/usr/lib/xorg/Xorg :0' >/dev/null 2>&1 \
-    && pgrep -f '/usr/lib/chromium/chromium.*--app=' >/dev/null 2>&1
+  # X must be up, and the kiosk Chromium must be the browser process.
+  # launch_chromium_kiosk.sh uses --kiosk. Older builds used --app=.
+  # Matching only --app= made this check fail every minute and restart
+  # kiosk-display, which blanks the screen and reloads the UI.
+  pgrep -f '/usr/lib/xorg/Xorg :0' >/dev/null 2>&1 || return 1
+  pgrep -f '/usr/lib/chromium/chromium .*--kiosk( |$)' >/dev/null 2>&1 \
+    && return 0
+  pgrep -f '/usr/lib/chromium/chromium .*--app=' >/dev/null 2>&1
 }
 
 # Never allow the legacy duplicate bridge unit to come back.
