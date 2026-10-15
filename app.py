@@ -3414,6 +3414,24 @@ def login_biometric():
                 }
             ), 403
 
+        expiry = data_service.get_member_password_expiry_state(member)
+        if bool(expiry.get("expired")):
+            _audit_event(
+                action="Biometric login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="biometric",
+                details="Password expired - reset required",
+                target_user=username,
+                extra={"templateId": template_id, "passwordExpiry": expiry},
+            )
+            return jsonify({
+                "error": "Password expired. Reset required.",
+                "passwordExpired": True,
+                "username": username,
+                "expiry": expiry,
+            }), 403
+
         user = dict(member)
         user.pop("password", None)
         user.pop("creationPasswordSalt", None)

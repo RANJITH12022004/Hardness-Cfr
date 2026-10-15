@@ -1267,11 +1267,6 @@ function refreshShellAccessVisibility() {
     var am = document.querySelector('.profile-actions button[onclick*="openAddMember"]');
     if (mp) mp.style.display = u && typeof canAccess === 'function' && canAccess(u, 'user-manage') ? '' : 'none';
     if (am) am.style.display = u && typeof canAccess === 'function' && canAccess(u, 'user-add') ? '' : 'none';
-    var valSettingsCard = document.querySelector('.settings-validation');
-    if (valSettingsCard) {
-        var showVal = u && typeof canAccessValidationOrCalibration === 'function' && canAccessValidationOrCalibration(u);
-        valSettingsCard.style.display = showVal ? '' : 'none';
-    }
     if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
     if (typeof refreshReportsActionButtons === 'function') refreshReportsActionButtons();
     if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();

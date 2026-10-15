@@ -1170,8 +1170,8 @@ def _compute_password_cycle_state(
     """
     Rolling password-expiry cycles anchored to installation date.
 
-    First enforcement boundary: installationDate + periodDays + 1 day
-    (e.g. install 01-03 with 30 days => enforce from 01-04).
+    First enforcement boundary: installationDate + periodDays
+    (e.g. install 01-03 with 1 day => enforce from 01-04).
     Later boundaries: every periodDays after that first boundary.
     Expired when passwordLastChangedAt is before the current cycle start.
     """
@@ -1189,7 +1189,7 @@ def _compute_password_cycle_state(
     plc_day = datetime(plc_dt.year, plc_dt.month, plc_dt.day)
 
     if now_day < anchor_day:
-        first = anchor_day + timedelta(days=period_days + 1)
+        first = anchor_day + timedelta(days=period_days)
         return {
             "expired": False,
             "reason": "before-anchor",
@@ -1201,7 +1201,7 @@ def _compute_password_cycle_state(
             "cycleIndex": 0,
         }
 
-    first_boundary = anchor_day + timedelta(days=period_days + 1)
+    first_boundary = anchor_day + timedelta(days=period_days)
     if now_day < first_boundary:
         return {
             "expired": False,
@@ -1234,7 +1234,7 @@ def _compute_password_cycle_state(
 def get_member_password_expiry_state(member: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     """
     Compute password expiry status for a non-factory member.
-    Global rolling cycles: installationDate + N * periodDays (first boundary at +period+1).
+    Global rolling cycles: installationDate + N * periodDays (first boundary at +periodDays).
     """
     policy = get_password_policy_for_members()
     if not policy.get("enabled"):
