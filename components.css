@@ -1110,7 +1110,8 @@ select.input-field {
 
 .reports-table th,
 .reports-table td {
-    border: 1px solid #4a5568;
+    border: none;
+    border-bottom: 1px solid #4a5568;
     padding: 8px 10px;
     text-align: left;
     color: #e2e8f0;
