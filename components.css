@@ -192,9 +192,8 @@
 }
 
 .test-icon svg {
-    width: 32px;
-    /* Smaller icon */
-    height: 32px;
+    width: 64px;
+    height: 64px;
 }
 
 .test-card h2 {
@@ -1070,12 +1069,12 @@ select.input-field {
 }
 
 .reports-filter-calibration {
-    background: #0891b2;
-    border-color: #0e7490;
+    background: #0d9488;
+    border-color: #0f766e;
 }
 
 .reports-filter-calibration:hover {
-    background: #0e7490;
+    background: #0f766e;
 }
 
 .reports-filter-export {
@@ -1365,6 +1364,17 @@ select.input-field {
 
 .report-preview-actions .btn-export:hover {
     background: #059669;
+}
+
+.report-preview-actions .btn-action,
+.report-preview-actions #btn-preview-recipe {
+    background: #059669;
+    color: white;
+}
+
+.report-preview-actions .btn-action:hover,
+.report-preview-actions #btn-preview-recipe:hover {
+    background: #047857;
 }
 
 .report-preview-actions .btn-close {
